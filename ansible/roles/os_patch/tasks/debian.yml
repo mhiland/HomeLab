@@ -1,0 +1,104 @@
+- name: Configure environment for unattended upgrades
+  set_fact:
+    apt_environment:
+      DEBIAN_FRONTEND: "{{ debian_frontend }}"
+      DEBIAN_PRIORITY: "{{ debian_priority }}"
+      APT_LISTCHANGES_FRONTEND: "{{ apt_listchanges_frontend }}"
+
+
+- name: Update apt cache on Debian-based systems
+  apt:
+    update_cache: yes
+  environment: "{{ apt_environment }}"
+  retries: "{{ max_retries }}"
+  delay: "{{ retry_delay_base }}"
+  register: apt_update
+
+- name: Run autoremove to clean up unused packages
+  apt:
+    autoremove: yes
+  environment: "{{ apt_environment }}"
+  retries: "{{ max_retries }}"
+  delay: "{{ retry_delay_base }}"
+  register: apt_autoremove
+
+- name: Run autoclean to clean package cache
+  apt:
+    autoclean: yes
+  environment: "{{ apt_environment }}"
+  retries: "{{ max_retries }}"
+  delay: "{{ retry_delay_base }}"
+  register: apt_autoclean
+
+- name: Run nightly patching on Debian-based systems
+  apt:
+    upgrade: safe
+    force_apt_get: yes
+  environment: "{{ apt_environment }}"
+  retries: "{{ max_retries }}"
+  delay: "{{ retry_delay_base }}"
+  when: patching_type == 'nightly'
+  register: patch_result
+
+- name: Run monthly full upgrade on Debian-based systems
+  apt:
+    upgrade: full
+    force_apt_get: yes
+  environment: "{{ apt_environment }}"
+  retries: "{{ max_retries }}"
+  delay: "{{ retry_delay_base }}"
+  when: patching_type == 'monthly'
+  register: patch_result
+
+- name: Create log directory
+  file:
+    path: "{{ log_directory }}"
+    state: directory
+    mode: '0755'
+  delegate_to: localhost
+  run_once: true
+  when: jenkins_log_format
+  become: no
+
+- name: Generate detailed log output
+  copy:
+    content: |
+      Ansible Patching Summary - {{ ansible_date_time.iso8601 }}
+      ============================================
+      Host: {{ inventory_hostname }}
+      Patching Type: {{ patching_type }}
+      User: {{ ansible_user_id }}
+      
+      APT Update Result:
+      {{ apt_update | to_nice_json }}
+      
+      Autoremove Result:
+      {{ apt_autoremove | to_nice_json }}
+      
+      Autoclean Result:
+      {{ apt_autoclean | to_nice_json }}
+      
+      Patch Result:
+      {{ patch_result | to_nice_json }}
+      
+      System Information:
+      OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+      Kernel: {{ ansible_kernel }}
+      Architecture: {{ ansible_architecture }}
+      
+    dest: "{{ log_directory }}/{{ inventory_hostname }}_{{ patching_type }}_{{ ansible_date_time.epoch }}.log"
+  delegate_to: localhost
+  when: jenkins_log_format
+  become: no
+
+- name: Display patch results
+  debug:
+    msg: |
+      Patching completed on {{ inventory_hostname }}
+      Type: {{ patching_type }}
+      Status: {{ 'SUCCESS' if patch_result is succeeded else 'FAILED' }}
+      {% if patch_result.changed %}
+      Packages updated: {{ patch_result.stdout_lines | length if patch_result.stdout_lines is defined else 'Unknown' }}
+      {% else %}
+      No packages were updated
+      {% endif %}

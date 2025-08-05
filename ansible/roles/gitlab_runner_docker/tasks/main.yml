@@ -1,0 +1,86 @@
+---
+- name: Check required environment variables
+  assert:
+    that:
+      - lookup('env', 'GITLAB_URL') != ''
+      - lookup('env', 'GITLAB_RUNNER_TOKEN') != ''
+    fail_msg: "GITLAB_URL and GITLAB_RUNNER_TOKEN environment variables must be set"
+
+- name: Get docker group ID
+  shell: "getent group docker | cut -d: -f3"
+  register: docker_group_result
+  become: yes
+
+- name: Set docker group ID variable
+  set_fact:
+    docker_group_id: "{{ docker_group_result.stdout }}"
+
+- name: Create GitLab Runner directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  with_items:
+    - "{{ gitlab_runner_docker_compose_dir }}"
+    - "{{ gitlab_runner_config_dir }}"
+  become: yes
+
+- name: Deploy docker-compose.yml
+  template:
+    src: docker-compose.yml.j2
+    dest: "{{ gitlab_runner_docker_compose_dir }}/docker-compose.yml"
+    mode: '0644'
+  become: yes
+  notify: recreate gitlab-runner
+
+- name: Start GitLab Runner container
+  community.docker.docker_compose_v2:
+    project_src: "{{ gitlab_runner_docker_compose_dir }}"
+    pull: always
+    state: present
+  become: yes
+
+- name: Wait for GitLab Runner to be ready
+  wait_for:
+    timeout: 30
+  delegate_to: localhost
+
+- name: Check if runner is already registered
+  command: >
+    docker exec {{ gitlab_runner_container_name }} 
+    gitlab-runner list
+  register: runner_list
+  become: yes
+  changed_when: false
+  failed_when: false
+
+- name: Register GitLab Runner
+  command: >
+    docker exec {{ gitlab_runner_container_name }} gitlab-runner register
+    --non-interactive
+    --url "{{ lookup('env', 'GITLAB_URL') }}"
+    --token "{{ lookup('env', 'GITLAB_RUNNER_TOKEN') }}"
+    --executor "{{ gitlab_runner_executor }}"
+    --docker-image "{{ gitlab_runner_docker_image }}"
+    --description "{{ ansible_hostname }}-docker-runner"
+    --docker-privileged="{{ gitlab_runner_docker_privileged }}"
+    {% for volume in gitlab_runner_docker_volumes %}
+    --docker-volumes "{{ volume }}"
+    {% endfor %}
+    --docker-memory "{{ gitlab_runner_docker_memory }}"
+    --docker-memory-swap "{{ gitlab_runner_docker_memory_swap }}"
+    --docker-cpus "{{ gitlab_runner_docker_cpus }}"
+  become: yes
+  when: runner_list.stdout.find('Executor=docker') == -1
+
+- name: Verify runner registration
+  command: >
+    docker exec {{ gitlab_runner_container_name }} 
+    gitlab-runner list
+  register: runner_verification
+  become: yes
+  changed_when: false
+
+- name: Display runner status
+  debug:
+    msg: "GitLab Runner registered: {{ runner_verification.stdout_lines }}"

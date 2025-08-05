@@ -1,0 +1,26 @@
+[ req ]
+default_bits       = 4096
+default_md         = sha256
+distinguished_name = req_distinguished_name
+req_extensions     = v3_req
+prompt             = no
+
+[ req_distinguished_name ]
+C  = CA
+ST = BC
+L  = Vancouver
+O  = MoonLitLabs
+OU = MLL.OPS
+CN = {{ inventory_hostname }}.homelab
+
+[ v3_req ]
+subjectAltName = @alt_names
+
+[ alt_names ]
+DNS.1 = {{ inventory_hostname }}.homelab
+DNS.2 = {{ inventory_hostname }}
+DNS.3 = vault.homelab
+DNS.4 = vault
+{% if vault_ip is defined %}
+IP.1 = {{ vault_ip }}
+{% endif %}

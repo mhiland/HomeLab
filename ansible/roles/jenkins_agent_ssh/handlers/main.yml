@@ -1,0 +1,8 @@
+---
+- name: restart jenkins ssh agent
+  community.docker.docker_compose_v2:
+    project_src: "{{ jenkins_ssh_agent_data_dir }}/compose"
+    recreate: always
+  become: true
+
+# Systemd handlers removed - using docker-compose restart policy instead

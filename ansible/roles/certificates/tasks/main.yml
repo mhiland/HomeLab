@@ -1,0 +1,9 @@
+- import_tasks: generate_csr.yml
+  tags: generate
+
+- import_tasks: sign_csr.yml
+  delegate_to: localhost
+  tags: sign
+
+- import_tasks: distribute_cert.yml
+  tags: distribute

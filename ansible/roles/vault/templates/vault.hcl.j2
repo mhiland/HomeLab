@@ -1,0 +1,22 @@
+storage "raft" {
+  path    = "{{ vault_storage_path }}"
+  node_id = "{{ ansible_hostname }}"
+{% if 'vault_secondary' in group_names %}
+  retry_join {
+    leader_api_addr = "{{ vault_cluster_addr }}"
+  }
+{% endif %}
+}
+
+api_addr = "https://{{ ansible_fqdn }}:8200"
+cluster_addr = "https://{{ ansible_fqdn }}:8201"
+
+ui = true
+listener "tcp" {
+  address = "0.0.0.0:8200"
+  cluster_address = "0.0.0.0:8201"
+  tls_disable = 0
+  tls_cert_file = "/etc/ssl/certs/{{ ansible_fqdn }}.crt"
+  tls_key_file  = "/etc/ssl/certs/{{ ansible_fqdn }}.key"
+  tls_client_ca_file = "/etc/vault.d/internal-ca.crt"
+}

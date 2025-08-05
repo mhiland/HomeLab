@@ -1,0 +1,32 @@
+ansible/inventories/homelab/hosts
+**/certs
+*.crt
+*.csr
+*.key
+.DS_Store
+
+logs/
+
+# Vault secrets and keys
+**/.vault-*
+**/unseal-keys*
+**/root-token*
+
+# Any potential backup files
+*.bak
+*.backup
+*.orig
+
+# Environment and config files
+*.env
+!*.env.example
+
+# Temporary files that might contain sensitive data
+*.tmp
+*.temp
+.serena/cache/*
+# Claude shared config symlink
+.claude-base.md
+
+# Local private configuration
+.local/

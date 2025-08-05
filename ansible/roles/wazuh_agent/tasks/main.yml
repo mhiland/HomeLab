@@ -1,0 +1,154 @@
+---
+# Wazuh Agent Installation and Configuration Tasks
+
+- name: Include OS-specific variables
+  include_vars: "{{ ansible_os_family }}.yml"
+  ignore_errors: yes
+
+- name: Check system architecture
+  fail:
+    msg: "Unsupported architecture: {{ ansible_architecture }}. This role supports aarch64, arm64, and x86_64."
+  when: ansible_architecture not in ['aarch64', 'arm64', 'x86_64']
+
+- name: Install required packages
+  package:
+    name:
+      - curl
+      - gnupg
+      - lsb-release
+      - apt-transport-https
+      - ca-certificates
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Add Wazuh repository GPG key
+  apt_key:
+    url: "{{ wazuh_repository_key }}"
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Add Wazuh repository
+  apt_repository:
+    repo: "{{ wazuh_repository }}"
+    state: present
+    update_cache: yes
+  when: ansible_os_family == "Debian"
+
+- name: Check if Wazuh agent is already installed
+  package_facts:
+    manager: auto
+  register: package_facts
+
+- name: Install Wazuh agent
+  package:
+    name: "{{ wazuh_package_name }}"
+    state: present
+    update_cache: yes
+  when: ansible_os_family == "Debian"
+  notify: restart wazuh-agent
+
+- name: Stop Wazuh agent service for configuration
+  systemd:
+    name: "{{ wazuh_service_name }}"
+    state: stopped
+    enabled: no
+  when: wazuh_package_name in ansible_facts.packages
+
+- name: Create Wazuh configuration directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: wazuh
+    mode: '0750'
+  loop:
+    - "{{ wazuh_dir }}/etc"
+    - "{{ wazuh_log_dir }}"
+    - "{{ wazuh_dir }}/queue"
+    - "{{ wazuh_dir }}/var"
+
+- name: Generate Wazuh agent configuration
+  template:
+    src: ossec.conf.j2
+    dest: "{{ wazuh_config_file }}"
+    owner: root
+    group: wazuh
+    mode: '0640'
+    backup: yes
+  notify: restart wazuh-agent
+
+- name: Check if agent is already registered
+  stat:
+    path: "{{ wazuh_dir }}/etc/client.keys"
+  register: client_keys
+
+- name: Register Wazuh agent with server
+  shell: |
+    {{ wazuh_agent_auth_script }} -m {{ wazuh_registration_server }} -p {{ wazuh_registration_port }} -A {{ wazuh_agent_name }}
+  register: registration_result
+  failed_when: registration_result.rc != 0 and 'already' not in registration_result.stderr
+  changed_when: registration_result.rc == 0
+  when: not client_keys.stat.exists
+  notify: restart wazuh-agent
+
+- name: Configure firewall for Wazuh agent
+  ufw:
+    rule: allow
+    port: "{{ item.split('/')[0] }}"
+    proto: "{{ item.split('/')[1] }}"
+    direction: out
+    comment: "Wazuh agent communication"
+  loop: "{{ wazuh_firewall_ports }}"
+  when: wazuh_firewall_enabled and ansible_os_family == "Debian"
+
+- name: Enable and start Wazuh agent service
+  systemd:
+    name: "{{ wazuh_service_name }}"
+    state: "{{ wazuh_service_state }}"
+    enabled: "{{ wazuh_service_enabled }}"
+    daemon_reload: yes
+  when: wazuh_service_enabled
+
+- name: Wait for Wazuh agent to start
+  wait_for:
+    timeout: 30
+  when: wazuh_service_enabled
+
+- name: Check Wazuh agent service status
+  systemd:
+    name: "{{ wazuh_service_name }}"
+  register: wazuh_service_status
+
+- name: Verify Wazuh agent connectivity
+  shell: |
+    {{ wazuh_bin_dir }}/wazuh-control status
+  register: wazuh_status
+  failed_when: false
+  changed_when: false
+
+- name: Get Wazuh agent information
+  shell: |
+    {{ wazuh_bin_dir }}/wazuh-control info
+  register: wazuh_info
+  failed_when: false
+  changed_when: false
+
+- name: Display Wazuh agent status
+  debug:
+    msg: |
+      Wazuh Agent Status:
+      - Service: {{ wazuh_service_status.status.ActiveState }}
+      - Agent Status: {{ wazuh_status.stdout if wazuh_status.rc == 0 else 'Failed to get status' }}
+      - Agent Info: {{ wazuh_info.stdout if wazuh_info.rc == 0 else 'Failed to get info' }}
+
+- name: Check log file for errors
+  shell: |
+    tail -20 {{ wazuh_log_dir }}/ossec.log | grep -i error || echo "No errors found"
+  register: log_errors
+  failed_when: false
+  changed_when: false
+
+- name: Display recent log errors (if any)
+  debug:
+    msg: "Recent log entries: {{ log_errors.stdout }}"
+  when: log_errors.rc == 0 and 'No errors found' not in log_errors.stdout

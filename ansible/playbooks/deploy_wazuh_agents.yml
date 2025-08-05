@@ -1,0 +1,230 @@
+---
+# Wazuh Agent Deployment Playbook
+# Deploys Wazuh agents to Raspberry Pi hosts for security monitoring
+# Connects to Wazuh server at wazuh.northwardlabs.ca with SSL verification disabled
+
+- hosts: raspberrypi
+  become: yes
+  gather_facts: yes
+  serial: "{{ serial_percentage | default(50) }}%"
+  
+  vars:
+    # Default Wazuh configuration
+    wazuh_deployment_enabled: true
+    wazuh_agent_enabled: true
+    
+    # Jenkins integration (auto-detected)
+    jenkins_mode: "{{ lookup('env', 'JENKINS_URL') != '' }}"
+    log_directory: "{{ lookup('env', 'WORKSPACE') | default('./logs') }}/wazuh_logs"
+    job_name: "{{ lookup('env', 'JOB_NAME') | default('manual_execution') }}"
+    build_number: "{{ lookup('env', 'BUILD_NUMBER') | default('0') }}"
+    
+    # Deployment configuration
+    deployment_timeout: 300
+    max_retries: 3
+
+  pre_tasks:
+    - name: Display deployment information
+      debug:
+        msg: |
+          === Wazuh Agent Deployment ===
+          Host: {{ inventory_hostname }}
+          Target: {{ ansible_default_ipv4.address }}
+          Jenkins Mode: {{ jenkins_mode }}
+          Job: {{ job_name }} #{{ build_number }}
+          Wazuh Server: {{ wazuh_server_url }}:{{ wazuh_server_port }}
+          SSL Verification: {{ wazuh_ssl_verify }}
+          Agent Groups: {{ wazuh_agent_groups }}
+          Timestamp: {{ ansible_date_time.iso8601 }}
+          
+    - name: Validate SSH connectivity
+      ping:
+        
+    - name: Check system architecture
+      fail:
+        msg: "This playbook is designed for ARM64 architecture, but found {{ ansible_architecture }}"
+      when: ansible_architecture not in ['aarch64', 'arm64']
+      
+    - name: Validate Wazuh server connectivity
+      uri:
+        url: "https://{{ wazuh_server_url }}:{{ wazuh_server_ssl_port }}"
+        method: GET
+        validate_certs: no
+        timeout: 10
+        status_code: [200, 401, 403]
+      register: server_check
+      failed_when: false
+      
+    - name: Display server connectivity status
+      debug:
+        msg: |
+          Wazuh server connectivity check:
+          Status: {{ 'REACHABLE' if server_check.status is defined else 'UNREACHABLE' }}
+          Response: {{ server_check.status | default('Connection failed') }}
+          
+    - name: Create log directory
+      file:
+        path: "{{ log_directory }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      run_once: true
+      when: jenkins_mode
+
+  roles:
+    - role: ../roles/wazuh_agent
+      when: wazuh_deployment_enabled
+
+  post_tasks:
+    - name: Wait for Wazuh agent to fully start
+      wait_for:
+        timeout: 30
+        
+    - name: Check Wazuh agent service status
+      systemd:
+        name: wazuh-agent
+      register: wazuh_service_final
+      
+    - name: Verify Wazuh agent connectivity to server
+      shell: |
+        timeout 30 {{ wazuh_bin_dir }}/wazuh-control status
+      register: agent_status_check
+      failed_when: false
+      changed_when: false
+      
+    - name: Get Wazuh agent key information
+      shell: |
+        if [ -f "{{ wazuh_dir }}/etc/client.keys" ]; then
+          echo "Agent registered with key present"
+          cat {{ wazuh_dir }}/etc/client.keys | cut -d' ' -f1-2
+        else
+          echo "No agent key found"
+        fi
+      register: agent_key_info
+      failed_when: false
+      changed_when: false
+      
+    - name: Check recent Wazuh logs for connection status
+      shell: |
+        tail -20 {{ wazuh_log_dir }}/ossec.log | grep -E "(Connected|Disconnected|ERROR|CRITICAL)" | tail -5 || echo "No connection logs found"
+      register: connection_logs
+      failed_when: false
+      changed_when: false
+      
+    - name: Generate Jenkins deployment summary
+      copy:
+        content: |
+          # Wazuh Agent Deployment Summary
+          
+          **Job:** {{ job_name }} #{{ build_number }}  
+          **Started:** {{ ansible_date_time.iso8601 }}  
+          **Host:** {{ inventory_hostname }} ({{ ansible_default_ipv4.address }})  
+          **User:** {{ ansible_user_id }}  
+          
+          ## System Information
+          - **OS:** {{ ansible_distribution }} {{ ansible_distribution_version }}
+          - **Kernel:** {{ ansible_kernel }}
+          - **Architecture:** {{ ansible_architecture }}
+          - **Memory:** {{ ansible_memtotal_mb }}MB
+          
+          ## Wazuh Configuration
+          - **Server:** {{ wazuh_server_url }}:{{ wazuh_server_port }}
+          - **SSL Verification:** {{ wazuh_ssl_verify }}
+          - **Agent Name:** {{ wazuh_agent_name }}
+          - **Agent Groups:** {{ wazuh_agent_groups }}
+          
+          ## Deployment Status
+          - **Service Status:** {{ wazuh_service_final.status.ActiveState }}
+          - **Service Enabled:** {{ wazuh_service_final.status.UnitFileState }}
+          - **Agent Status:** {{ agent_status_check.stdout | default('Status check failed') }}
+          - **Registration:** {{ agent_key_info.stdout | default('Key check failed') }}
+          
+          ## Server Connectivity
+          - **Server Check:** {{ 'REACHABLE' if server_check.status is defined else 'UNREACHABLE' }}
+          - **Response Code:** {{ server_check.status | default('Connection failed') }}
+          
+          ## Recent Connection Logs
+          ```
+          {{ connection_logs.stdout | default('No logs available') }}
+          ```
+          
+          ## Configuration Files
+          - **Main Config:** {{ wazuh_config_file }}
+          - **Agent Keys:** {{ wazuh_dir }}/etc/client.keys
+          - **Log Directory:** {{ wazuh_log_dir }}
+          
+          ## Troubleshooting
+          {% if wazuh_service_final.status.ActiveState != 'active' %}
+          ⚠️ **Service not active** - Check service logs:
+          ```bash
+          journalctl -u wazuh-agent -n 50
+          ```
+          {% endif %}
+          
+          {% if 'No agent key found' in agent_key_info.stdout %}
+          ⚠️ **Agent not registered** - Manual registration may be needed:
+          ```bash
+          {{ wazuh_agent_auth_script }} -m {{ wazuh_registration_server }} -p {{ wazuh_registration_port }} -A {{ wazuh_agent_name }}
+          ```
+          {% endif %}
+          
+          ## Next Steps
+          1. Verify agent appears in Wazuh dashboard at https://{{ wazuh_server_url }}:{{ wazuh_server_ssl_port }}
+          2. Check agent is receiving and sending logs
+          3. Configure custom rules and policies as needed
+          4. Set up alerting and monitoring for security events
+          
+        dest: "{{ log_directory }}/{{ inventory_hostname }}_wazuh_{{ build_number }}.md"
+      delegate_to: localhost
+      when: jenkins_mode
+      
+    - name: Display completion status
+      debug:
+        msg: |
+          === Wazuh Agent Deployment Complete ===
+          Host: {{ inventory_hostname }}
+          Service: {{ wazuh_service_final.status.ActiveState }}
+          Agent Status: {{ agent_status_check.stdout | default('Status check failed') }}
+          Registration: {{ agent_key_info.stdout | default('Key check failed') }}
+          
+          {% if wazuh_service_final.status.ActiveState == 'active' %}
+          ✓ SUCCESS: Wazuh agent is running and configured
+          {% else %}
+          ✗ WARNING: Wazuh agent service issues detected
+          {% endif %}
+          
+          Server: https://{{ wazuh_server_url }}:{{ wazuh_server_ssl_port }}
+          Config: {{ wazuh_config_file }}
+          Logs: {{ wazuh_log_dir }}/ossec.log
+          
+    - name: Set deployment status fact
+      set_fact:
+        deployment_success: "{{ wazuh_service_final.status.ActiveState == 'active' }}"
+        deployment_issues: >-
+          {{
+            ([] if wazuh_service_final.status.ActiveState == 'active' else ['Service not active']) +
+            ([] if 'No agent key found' not in agent_key_info.stdout else ['Agent not registered']) +
+            ([] if server_check.status is defined else ['Server unreachable'])
+          }}
+    
+    # Optional: Fail deployment if critical issues detected
+    - name: Check for critical deployment issues
+      fail:
+        msg: |
+          CRITICAL: Wazuh agent deployment failed on {{ inventory_hostname }}
+          
+          Issues found:
+          {% for issue in deployment_issues %}
+          - {{ issue }}
+          {% endfor %}
+          
+          Actions required:
+          1. Check service status: systemctl status wazuh-agent
+          2. Review logs: journalctl -u wazuh-agent -n 50
+          3. Verify server connectivity: curl -k https://{{ wazuh_server_url }}:{{ wazuh_server_ssl_port }}
+          4. Check configuration: {{ wazuh_config_file }}
+          5. Re-run deployment if needed
+      when: 
+        - deployment_issues is defined 
+        - deployment_issues | length > 0
+        - wazuh_service_final.status.ActiveState != 'active'

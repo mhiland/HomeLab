@@ -1,0 +1,50 @@
+[Unit]
+Description=Process Exporter
+Documentation=https://github.com/ncabatoff/process-exporter
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User={{ process_exporter_user }}
+Group={{ process_exporter_group }}
+ExecReload=/bin/kill -HUP $MAINPID
+ExecStart={{ process_exporter_binary_install_dir }}/process-exporter \
+  --web.listen-address=:{{ process_exporter_port }} \
+  --config.path={{ process_exporter_config_dir }}/config.yml
+
+SyslogIdentifier=process-exporter
+Restart={{ restart_policy }}
+RestartSec={{ restart_delay }}
+NoNewPrivileges=yes
+
+# Security measures
+ProtectHome=yes
+ProtectSystem=strict
+ProtectHostname=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+RestrictNamespaces=yes
+
+# Allow access to system directories for process monitoring
+ReadWritePaths={{ process_exporter_config_dir }}
+ReadOnlyPaths=/proc /sys
+
+# Network
+PrivateNetwork=no
+
+# Directories
+RuntimeDirectory=process-exporter
+RuntimeDirectoryMode=0755
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,49 @@
+# Private HomeLab Configuration Template
+# Copy this to .local/homelab-private.yml and customize for your environment
+# This file is gitignored and contains site-specific details
+
+---
+# Private Infrastructure Details
+private_hostnames:
+  pi1: "rpi1"          # Your actual Pi 1 hostname
+  pi2: "rpi2"          # Your actual Pi 2 hostname  
+  pi3: "rpi3"          # Your actual Pi 3 hostname
+  pi4: "rpi4"          # Your actual Pi 4 hostname
+
+private_ips:
+  pi1: "192.168.1.101"   # Your actual Pi 1 IP
+  pi2: "192.168.1.102"   # Your actual Pi 2 IP
+  pi3: "192.168.1.103"   # Your actual Pi 3 IP
+  pi4: "192.168.1.104"   # Your actual Pi 4 IP
+  fedora_server: "192.168.1.105"  # Your Fedora server IP
+
+# User Configuration
+private_username: "your-username"    # Your SSH username
+private_domain: "your-domain.com"    # Your internal domain
+
+# Service URLs (fallbacks when environment variables not set)
+private_jenkins_url: "https://jenkins.your-domain.com" 
+private_gitlab_url: "https://gitlab.your-domain.com"
+private_prometheus_url: "https://prometheus.your-domain.com"
+private_registry_url: "registry.your-domain.com"
+private_wazuh_server: "wazuh.your-domain.com"
+
+# Monitoring Targets (specific to your infrastructure)
+private_monitoring_targets:
+  node_exporter:
+    - "{{ private_hostnames.pi1 }}:9100"
+    - "{{ private_hostnames.pi2 }}:9100" 
+    - "{{ private_hostnames.pi3 }}:9100"
+    - "{{ private_hostnames.pi4 }}:9100"
+    - "fedora_server:9100"
+
+# Network Configuration
+private_networks:
+  home_network: "192.168.1.0/24"    # Your home network CIDR
+  docker_networks: "172.16.0.0/12"  # Your Docker network range
+
+# Vault Configuration
+private_vault:
+  primary_host: "{{ private_hostnames.pi3 }}"
+  secondary_host: "{{ private_hostnames.pi1 }}"
+  cluster_addr: "https://{{ private_hostnames.pi3 }}:8200"

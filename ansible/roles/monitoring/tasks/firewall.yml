@@ -1,0 +1,77 @@
+---
+# Firewall configuration for monitoring exporters
+
+- name: Check if UFW is installed (Ubuntu/Debian)
+  command: which ufw
+  register: ufw_check
+  failed_when: false
+  changed_when: false
+
+- name: Configure UFW firewall rules
+  when: ufw_check.rc == 0 and ansible_os_family == "Debian"
+  block:
+    - name: Allow node exporter port through UFW
+      ufw:
+        rule: allow
+        port: "{{ node_exporter_port }}"
+        proto: tcp
+        comment: "Node Exporter metrics"
+
+    - name: Allow process exporter port through UFW
+      ufw:
+        rule: allow
+        port: "{{ process_exporter_port }}"
+        proto: tcp
+        comment: "Process Exporter metrics"
+      when: process_exporter_enabled
+
+- name: Check if firewalld is installed (CentOS/RHEL/Fedora)
+  command: which firewalld
+  register: firewalld_check
+  failed_when: false
+  changed_when: false
+
+- name: Configure firewalld rules
+  when: firewalld_check.rc == 0 and ansible_os_family == "RedHat"
+  block:
+    - name: Allow node exporter port through firewalld
+      firewalld:
+        port: "{{ node_exporter_port }}/tcp"
+        permanent: yes
+        state: enabled
+        immediate: yes
+
+    - name: Allow process exporter port through firewalld
+      firewalld:
+        port: "{{ process_exporter_port }}/tcp"
+        permanent: yes
+        state: enabled
+        immediate: yes
+      when: process_exporter_enabled
+
+- name: Configure iptables rules (fallback)
+  when: ufw_check.rc != 0 and firewalld_check.rc != 0
+  block:
+    - name: Allow node exporter port through iptables
+      iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "{{ node_exporter_port }}"
+        jump: ACCEPT
+        comment: "Node Exporter metrics"
+
+    - name: Allow process exporter port through iptables
+      iptables:
+        chain: INPUT
+        protocol: tcp
+        destination_port: "{{ process_exporter_port }}"
+        jump: ACCEPT
+        comment: "Process Exporter metrics"
+      when: process_exporter_enabled
+
+    - name: Save iptables rules
+      shell: |
+        if command -v iptables-save >/dev/null 2>&1; then
+          iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+        fi
+      changed_when: false

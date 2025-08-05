@@ -1,0 +1,13 @@
+---
+- name: restart gitlab-runner
+  community.docker.docker_compose_v2:
+    project_src: "{{ gitlab_runner_docker_compose_dir }}"
+    state: restarted
+  become: yes
+
+- name: recreate gitlab-runner
+  community.docker.docker_compose_v2:
+    project_src: "{{ gitlab_runner_docker_compose_dir }}"
+    recreate: always
+    pull: always
+  become: yes

@@ -1,0 +1,309 @@
+pipeline {
+    agent {
+        label 'ansible'
+    }
+
+    triggers {
+        // Run first Sunday of every month at 3:00 AM
+        cron('H 3 1-7 * 0')
+    }
+
+    parameters {
+        choice(
+            name: 'SERIAL_PERCENTAGE',
+            choices: ['25', '50', '75', '100'],
+            description: 'Percentage of hosts to patch simultaneously'
+        )
+        booleanParam(
+            name: 'DRY_RUN',
+            defaultValue: false,
+            description: 'Run in check mode only (no actual changes)'
+        )
+        string(
+            name: 'TARGET_HOSTS',
+            defaultValue: 'all',
+            description: 'Ansible host pattern (all, raspberrypi, fedora, pi1, etc.)'
+        )
+        string(
+            name: 'BRANCH',
+            defaultValue: '*/main',
+            description: 'Git branch to use for playbooks (default: */main)'
+        )
+        booleanParam(
+            name: 'FORCE_REBOOT_CHECK',
+            defaultValue: true,
+            description: 'Force reboot requirement check after full upgrades'
+        )
+    }
+
+    environment {
+        ANSIBLE_HOST_KEY_CHECKING = 'False'
+        ANSIBLE_STDOUT_CALLBACK = 'yaml'
+        ANSIBLE_FORCE_COLOR = 'true'
+        ANSIBLE_RETRY_FILES_ENABLED = 'False'
+        PATCHING_TYPE = 'monthly'
+        PLAYBOOK = 'playbooks/patch_systems_monthly.yml'
+    }
+
+    stages {
+        stage('Preparation') {
+            steps {
+                script {
+                    echo "=== HomeLab Monthly Patching ==="
+                    echo "Job: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+                    echo "Started: ${new Date()}"
+                    echo "Type: Full system upgrade (all packages)"
+                    echo "Serial Execution: ${params.SERIAL_PERCENTAGE}%"
+                    echo "Target Hosts: ${params.TARGET_HOSTS}"
+                    echo "Branch: ${params.BRANCH}"
+                    echo "Dry Run: ${params.DRY_RUN}"
+                    echo "Playbook: ${env.PLAYBOOK}"
+                    
+                    if (!params.DRY_RUN) {
+                        echo "⚠️ WARNING: Monthly patching performs FULL system upgrades"
+                        echo "⚠️ This may take 30-60 minutes and could require reboots"
+                        echo "⚠️ Monitor systems closely after completion"
+                    }
+                }
+
+                // Setup inventory from Jenkins secret
+                withCredentials([file(credentialsId: 'ansible-inventory-homelab', variable: 'INVENTORY_FILE')]) {
+                    dir('ansible') {
+                        sh 'mkdir -p inventories/homelab'
+                        sh 'cp "$INVENTORY_FILE" inventories/homelab/hosts'
+                        sh 'chmod 644 inventories/homelab/hosts'
+                        echo "✅ Inventory file copied successfully"
+                    }
+                }
+            }
+        }
+
+        stage('Pre-Patching System Info') {
+            steps {
+                dir('ansible') {
+                    withCredentials([sshUserPrivateKey(credentialsId: 'ansible-ssh-key', keyFileVariable: 'SSH_KEY_FILE', usernameVariable: 'SSH_USER')]) {
+                        script {
+                            echo "=== Pre-Patching System Information ==="
+                            try {
+                                sh """
+                                    ansible ${params.TARGET_HOSTS != 'all' ? params.TARGET_HOSTS : 'all'} \\
+                                        -m setup \\
+                                        -a "filter=ansible_distribution*,ansible_kernel,ansible_memtotal_mb,ansible_uptime_seconds" \\
+                                        -i inventories/homelab/hosts \\
+                                        --private-key "\${SSH_KEY_FILE}" \\
+                                        --user "\${SSH_USER}" \\
+                                        --timeout=30
+                                """
+                            } catch (Exception e) {
+                                echo "⚠️ Could not gather complete system info: ${e.getMessage()}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Connectivity Check') {
+            steps {
+                dir('ansible') {
+                    withCredentials([sshUserPrivateKey(credentialsId: 'ansible-ssh-key', keyFileVariable: 'SSH_KEY_FILE', usernameVariable: 'SSH_USER')]) {
+                        script {
+                            echo "=== Connectivity Check ==="
+                            try {
+                                sh """
+                                    ansible ${params.TARGET_HOSTS != 'all' ? params.TARGET_HOSTS : 'all'} \\
+                                        -m ping \\
+                                        -i inventories/homelab/hosts \\
+                                        --private-key "\${SSH_KEY_FILE}" \\
+                                        --user "\${SSH_USER}" \\
+                                        --timeout=30
+                                """
+                                echo "✅ All target hosts are reachable"
+                            } catch (Exception e) {
+                                echo "❌ Some hosts failed connectivity check"
+                                echo "Error: ${e.getMessage()}"
+                                error("Connectivity check failed. Ensure all target hosts are accessible via SSH.")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Execute Monthly Patching') {
+            steps {
+                dir('ansible') {
+                    withCredentials([sshUserPrivateKey(credentialsId: 'ansible-ssh-key', keyFileVariable: 'SSH_KEY_FILE', usernameVariable: 'SSH_USER')]) {
+                        script {
+                            echo "=== Starting Monthly Patching (Full System Upgrade) ==="
+
+                            def extraVarsString = "serial_percentage=${params.SERIAL_PERCENTAGE} patching_type=monthly"
+                            def limitString = params.TARGET_HOSTS != 'all' ? "--limit ${params.TARGET_HOSTS}" : ""
+                            def checkString = params.DRY_RUN ? "--check --diff" : ""
+
+                            echo "Extra vars: ${extraVarsString}"
+                            echo "Limit: ${params.TARGET_HOSTS != 'all' ? params.TARGET_HOSTS : 'none'}"
+                            echo "Check mode: ${params.DRY_RUN}"
+
+                            // Execute monthly patching with extended timeout
+                            timeout(time: 90, unit: 'MINUTES') {
+                                sh """
+                                    ANSIBLE_ROLES_PATH=roles ansible-playbook ${env.PLAYBOOK} \\
+                                        -i inventories/homelab/hosts \\
+                                        --extra-vars "${extraVarsString}" \\
+                                        --private-key "\${SSH_KEY_FILE}" \\
+                                        --user "\${SSH_USER}" \\
+                                        ${limitString} \\
+                                        ${checkString} \\
+                                        -v
+                                """
+                            }
+
+                            echo "✅ Monthly patching completed successfully"
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Post-Patching Verification') {
+            when {
+                expression { !params.DRY_RUN }
+            }
+            steps {
+                dir('ansible') {
+                    withCredentials([sshUserPrivateKey(credentialsId: 'ansible-ssh-key', keyFileVariable: 'SSH_KEY_FILE', usernameVariable: 'SSH_USER')]) {
+                        script {
+                            echo "=== Post-Patching Verification ==="
+
+                            // Wait a moment for systems to settle
+                            sleep(time: 30, unit: "SECONDS")
+
+                            // Connectivity check with retries
+                            echo "=== Connectivity Check ==="
+                            try {
+                                sh """
+                                    ansible ${params.TARGET_HOSTS != 'all' ? params.TARGET_HOSTS : 'all'} \\
+                                        -m ping \\
+                                        -i inventories/homelab/hosts \\
+                                        --private-key "\${SSH_KEY_FILE}" \\
+                                        --user "\${SSH_USER}" \\
+                                        --timeout=30
+                                """
+                                echo "✅ All hosts remain accessible after patching"
+                            } catch (Exception e) {
+                                echo "⚠️ Some hosts may have connectivity issues after patching"
+                                echo "This could be normal if hosts rebooted automatically"
+                            }
+
+                            // Comprehensive reboot requirement check
+                            echo "=== Reboot Requirements Check ==="
+                            try {
+                                sh """
+                                    ansible ${params.TARGET_HOSTS != 'all' ? params.TARGET_HOSTS : 'all'} \\
+                                        -m shell \\
+                                        -a "echo 'Host:' \\\$(hostname) && uptime && echo 'Reboot check:' && test -f /var/run/reboot-required && echo 'REBOOT_REQUIRED' || echo 'NO_REBOOT_NEEDED'" \\
+                                        -i inventories/homelab/hosts \\
+                                        --private-key "\${SSH_KEY_FILE}" \\
+                                        --user "\${SSH_USER}" \\
+                                        --timeout=30
+                                """
+                            } catch (Exception e) {
+                                echo "Could not check all hosts: ${e.getMessage()}"
+                            }
+
+                            // Kernel version check
+                            echo "=== Kernel Version Check ==="
+                            try {
+                                sh """
+                                    ansible ${params.TARGET_HOSTS != 'all' ? params.TARGET_HOSTS : 'all'} \\
+                                        -m shell \\
+                                        -a "uname -r" \\
+                                        -i inventories/homelab/hosts \\
+                                        --private-key "\${SSH_KEY_FILE}" \\
+                                        --user "\${SSH_USER}" \\
+                                        --timeout=30
+                                """
+                            } catch (Exception e) {
+                                echo "Could not get kernel versions: ${e.getMessage()}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Generate Monthly Report') {
+            steps {
+                script {
+                    def reportContent = """
+# Monthly Patching Report
+
+**Date:** ${new Date()}
+**Job:** ${env.JOB_NAME} #${env.BUILD_NUMBER}
+**Type:** Full System Upgrade
+**Mode:** ${params.DRY_RUN ? 'DRY RUN' : 'LIVE EXECUTION'}
+
+## Configuration
+- **Serial Percentage:** ${params.SERIAL_PERCENTAGE}%
+- **Target Hosts:** ${params.TARGET_HOSTS}
+- **Force Reboot Check:** ${params.FORCE_REBOOT_CHECK}
+
+## Post-Patching Actions Required
+1. Review system logs for any errors
+2. Reboot hosts marked as REBOOT_REQUIRED
+3. Verify all services are running properly
+4. Monitor system stability for 24-48 hours
+
+## Next Monthly Patching
+- Scheduled for first Sunday of next month at 3:00 AM
+- Consider reviewing security bulletins before next run
+
+---
+*Generated by Jenkins Monthly Patching Pipeline*
+"""
+
+                    writeFile file: "monthly_patching_report_${env.BUILD_NUMBER}.md",
+                             text: reportContent
+                    echo reportContent
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                echo "=== Archiving Artifacts ==="
+                def logPaths = [
+                    'logs/**/*',
+                    'ansible/logs/**/*',
+                    'ansible_logs/**/*',
+                    "monthly_patching_report_*.md"
+                ]
+
+                logPaths.each { pattern ->
+                    try {
+                        archiveArtifacts artifacts: pattern, allowEmptyArchive: true
+                    } catch (Exception e) {
+                        echo "No artifacts found matching: ${pattern}"
+                    }
+                }
+
+                // Clean up
+                dir('ansible') {
+                    sh 'find . -name "*.retry" -delete || true'
+                    sh 'rm -f inventories/homelab/hosts || true'
+                }
+            }
+        }
+        success {
+            echo "✅ Monthly patching completed successfully"
+            echo "📋 Check archived report for reboot requirements"
+        }
+        failure {
+            echo "❌ Monthly patching failed on ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+            echo "🚨 Manual intervention may be required"
+        }
+    }
+}

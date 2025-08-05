@@ -1,0 +1,38 @@
+---
+# Docker installation defaults for Raspberry Pi
+docker_edition: 'ce'
+docker_package: "docker-{{ docker_edition }}"
+docker_package_state: present
+
+# Docker Compose
+docker_install_compose: true
+docker_compose_version: "2.24.0"
+docker_compose_path: /usr/local/bin/docker-compose
+
+# Users to add to docker group
+docker_users:
+  - "{{ ansible_user }}"
+
+# Docker daemon configuration
+docker_daemon_options:
+  log-driver: "json-file"
+  log-opts:
+    max-size: "10m"
+    max-file: "3"
+  storage-driver: "overlay2"
+  # ARM64 specific options
+  default-ulimits:
+    nofile:
+      Name: nofile
+      Hard: 65536
+      Soft: 65536
+
+# Service options
+docker_service_state: started
+docker_service_enabled: true
+docker_restart_handler_state: restarted
+
+# Debian/Raspbian specific
+docker_apt_release_channel: stable
+docker_apt_arch: arm64
+docker_apt_gpg_key: https://download.docker.com/linux/debian/gpg

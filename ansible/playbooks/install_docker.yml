@@ -1,0 +1,75 @@
+---
+- name: Install Docker on Raspberry Pi cluster
+  hosts: raspberrypi
+  become: yes
+  gather_facts: yes
+
+  pre_tasks:
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Check OS compatibility
+      assert:
+        that:
+          - ansible_os_family == "Debian"
+          - ansible_architecture == "aarch64" or ansible_architecture == "arm64"
+        fail_msg: "This playbook requires Debian-based ARM64 systems"
+
+  roles:
+    - docker
+
+  post_tasks:
+    - name: Test Docker installation
+      command: docker run --rm hello-world
+      register: docker_test
+      changed_when: false
+      failed_when: false
+
+    - name: Display Docker test result
+      debug:
+        msg: "Docker is working correctly!"
+      when: docker_test.rc == 0
+
+    - name: Display Docker test failure
+      debug:
+        msg: "Docker test failed. You may need to log out and back in for group membership to take effect."
+      when: docker_test.rc != 0
+
+- name: Install Docker on Fedora systems
+  hosts: fedora
+  become: yes
+  gather_facts: yes
+
+  pre_tasks:
+    - name: Update dnf cache
+      dnf:
+        update_cache: yes
+
+    - name: Check OS compatibility
+      assert:
+        that:
+          - ansible_os_family == "RedHat"
+          - ansible_distribution == "Fedora"
+        fail_msg: "This playbook requires Fedora systems"
+
+  roles:
+    - docker_fedora
+
+  post_tasks:
+    - name: Test Docker installation
+      command: docker run --rm hello-world
+      register: docker_test
+      changed_when: false
+      failed_when: false
+
+    - name: Display Docker test result
+      debug:
+        msg: "Docker is working correctly!"
+      when: docker_test.rc == 0
+
+    - name: Display Docker test failure
+      debug:
+        msg: "Docker test failed. You may need to log out and back in for group membership to take effect."
+      when: docker_test.rc != 0

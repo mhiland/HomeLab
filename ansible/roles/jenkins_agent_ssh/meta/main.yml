@@ -1,0 +1,24 @@
+---
+galaxy_info:
+  author: HomeLab
+  description: Jenkins SSH Agent deployment for Raspberry Pi
+  license: MIT
+  min_ansible_version: 2.9
+  platforms:
+    - name: Debian
+      versions:
+        - buster
+        - bullseye
+    - name: Ubuntu
+      versions:
+        - focal
+        - jammy
+  galaxy_tags:
+    - jenkins
+    - ssh
+    - agent
+    - docker
+    - arm64
+    - raspberrypi
+
+dependencies: []

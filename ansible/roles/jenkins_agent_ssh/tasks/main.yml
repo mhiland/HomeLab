@@ -1,0 +1,114 @@
+---
+- name: Validate Jenkins SSH configuration
+  assert:
+    that:
+      - jenkins_agent_ssh_pubkey | length > 0
+    fail_msg: "JENKINS_AGENT_SSH_PUBKEY variable must be set"
+
+- name: Install required packages
+  package:
+    name:
+      - python3-docker
+      - docker-compose
+    state: present
+  become: true
+
+- name: Create Jenkins SSH agent directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+  become: true
+  loop:
+    - "{{ jenkins_ssh_agent_data_dir }}"
+    - "{{ jenkins_ssh_agent_data_dir }}/compose"
+    - "{{ jenkins_ssh_agent_data_dir }}/workspace"
+
+- name: Set proper ownership for workspace
+  file:
+    path: "{{ jenkins_ssh_agent_data_dir }}/workspace"
+    owner: "1000"
+    group: "1000"
+    mode: '0755'
+  become: true
+
+- name: Deploy docker-compose.yml
+  template:
+    src: docker-compose.yml.j2
+    dest: "{{ jenkins_ssh_agent_data_dir }}/compose/docker-compose.yml"
+    mode: '0644'
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+  notify: restart jenkins ssh agent
+
+- name: Pull Jenkins SSH agent image from registry
+  docker_image:
+    name: "{{ jenkins_ssh_agent_image }}"
+    source: pull
+    force_source: true
+    timeout: 600  # 10 minutes timeout for large image
+  become: true
+  register: image_pull
+  retries: 2
+  delay: 30
+  until: image_pull is succeeded
+
+- name: Stop and remove existing container if present
+  docker_container:
+    name: "{{ jenkins_ssh_agent_container_name }}"
+    state: absent
+  become: true
+  ignore_errors: true
+
+- name: Deploy Jenkins SSH agent with docker-compose
+  community.docker.docker_compose_v2:
+    project_src: "{{ jenkins_ssh_agent_data_dir }}/compose"
+    state: present
+    recreate: "{{ 'always' if image_pull is changed else 'auto' }}"
+  become: true
+  register: compose_result
+
+- name: Wait for container to be ready
+  wait_for:
+    timeout: 30
+  when: compose_result is changed
+
+- name: Wait for SSH service to be ready
+  wait_for:
+    port: "{{ jenkins_ssh_agent_ssh_port }}"
+    host: "{{ ansible_default_ipv4.address }}"
+    delay: 10
+    timeout: 120
+    state: started
+  when: compose_result is changed
+
+- name: Check Jenkins SSH agent container status
+  docker_container_info:
+    name: "{{ jenkins_ssh_agent_container_name }}"
+  become: true
+  register: agent_container
+  failed_when: false
+
+- name: Display Jenkins SSH agent status
+  debug:
+    msg: |
+      Jenkins SSH Agent Status:
+      - Container: {{ 'Running' if agent_container.container.State.Running | default(false) else 'Not Running' }}
+      - Agent Name: {{ jenkins_agent_name }}
+      - SSH Port: {{ jenkins_ssh_agent_ssh_port }}
+      - Labels: {{ jenkins_ssh_agent_labels }}
+  when: agent_container.container is defined
+
+- name: Test SSH connectivity
+  command: |
+    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p {{ jenkins_ssh_agent_ssh_port }} jenkins@{{ ansible_default_ipv4.address }} echo "SSH connection successful"
+  delegate_to: localhost
+  register: ssh_test
+  failed_when: false
+  changed_when: false
+
+- name: Display SSH connectivity result
+  debug:
+    msg: "SSH Test: {{ 'SUCCESS' if ssh_test.rc == 0 else 'FAILED' }}"

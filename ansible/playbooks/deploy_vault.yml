@@ -1,0 +1,7 @@
+- name: Deploy Hashicorp Vault Cluster
+  hosts: vault_primary, vault_secondary
+  become: yes
+  vars_files:
+    - roles/vault/defaults/main.yml
+  roles:
+    - vault

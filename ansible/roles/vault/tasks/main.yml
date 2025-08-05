@@ -1,0 +1,267 @@
+# Install Vault
+- name: Create temporary directory for Vault download
+  file:
+    path: /tmp/vault
+    state: directory
+    mode: '0755'
+
+- name: Download Vault binary for ARM64
+  get_url:
+    url: "https://releases.hashicorp.com/vault/{{ vault_version }}/vault_{{ vault_version }}_linux_arm64.zip"
+    dest: /tmp/vault/vault.zip
+    mode: '0644'
+    checksum: "sha256:{{ vault_version_sha256sum }}"
+  when: ansible_architecture in ["aarch64", "arm64"]
+
+- name: Unarchive Vault binary
+  unarchive:
+    src: /tmp/vault/vault.zip
+    dest: /tmp/vault
+    remote_src: yes
+    creates: /tmp/vault/vault
+  when: ansible_architecture in ["aarch64", "arm64"]
+
+#  Wait for Vault binary extraction to complete
+- pause:
+      seconds: 30
+
+- name: Copy Vault binary to /usr/local/bin
+  copy:
+    src: /tmp/vault/vault
+    dest: /usr/local/bin/vault
+    mode: '0755'
+    remote_src: yes
+  notify: restart vault
+
+- name: Create Vault user and group
+  user:
+    name: vault
+    system: yes
+    create_home: no
+
+- name: Create Vault data directory for Raft storage
+  file:
+    path: /opt/vault/data
+    state: directory
+    owner: vault
+    group: vault
+    mode: '0750'
+
+- name: Create Vault configuration directory
+  file:
+    path: /etc/vault.d
+    state: directory
+    owner: vault
+    group: vault
+    mode: '0750'
+
+- name: Deploy Vault configuration
+  template:
+    src: vault.hcl.j2
+    dest: /etc/vault.d/vault.hcl
+    owner: vault
+    group: vault
+    mode: '0640'
+  notify: restart vault
+
+- name: Grant Vault the ability to lock memory (mlock)
+  command: setcap cap_ipc_lock=+ep /usr/local/bin/vault
+  when: ansible_architecture in ["aarch64", "arm64"]
+
+- name: Create systemd service file for Vault
+  copy:
+    dest: /etc/systemd/system/vault.service
+    content: |
+      [Unit]
+      Description=Vault service
+      After=network.target
+
+      [Service]
+      User=vault
+      Group=vault
+      ExecStart=/usr/local/bin/vault server -config=/etc/vault.d/vault.hcl
+      ExecReload=/bin/kill --signal HUP $MAINPID
+      Restart=on-failure
+      LimitMEMLOCK=infinity
+      LimitNOFILE=65536
+
+      [Install]
+      WantedBy=multi-user.target
+    mode: '0644'
+
+- name: Reload systemd daemon
+  systemd:
+    daemon_reload: yes
+
+- name: Enable and start Vault service
+  systemd:
+    name: vault
+    enabled: yes
+    state: started
+
+- pause:
+      seconds: 15
+
+# Primary node tasks: initialize the cluster if needed
+- name: Check if Vault is already initialized
+  command: vault status -address={{ vault_cluster_addr }} -format=json
+  register: vault_status
+  changed_when: false
+  failed_when: false
+  when: "'vault_primary' in group_names"
+
+- name: Initialize Vault if not already initialized
+  command: vault operator init -address={{ vault_cluster_addr }} -format=json
+  register: vault_init
+  changed_when: vault_init.stdout is defined and vault_init.stdout | length > 0
+  when: 
+    - "'vault_primary' in group_names"
+    - vault_status.stdout is defined
+    - (vault_status.stdout | from_json).initialized == false
+
+# Save Vault Unseal Keys
+- name: Define vault_unseal_keys as an empty list if not already set
+  set_fact:
+    vault_unseal_keys: []
+  when: 
+    - "'vault_primary' in group_names"
+    - vault_unseal_keys is not defined
+
+- name: Save Unseal Keys
+  set_fact:
+    vault_unseal_keys: "{{ vault_init.stdout | from_json | json_query('unseal_keys_b64') }}"
+  when: 
+    - "'vault_primary' in group_names" 
+    - vault_init.stdout is defined and vault_init.stdout | length > 0
+
+- name: Store Unseal Keys in Secure File
+  copy:
+    dest: /root/.vault-unseal-keys.json
+    content: "{{ vault_unseal_keys | to_nice_json }}"
+    mode: "0600"
+  when: 
+    - "'vault_primary' in group_names" 
+    - vault_unseal_keys | length > 0
+
+# Load Vault Unseal Keys (if not already loaded)
+- name: Check if Vault unseal keys file exists
+  stat:
+    path: /root/.vault-unseal-keys.json
+  register: vault_unseal_keys_file
+  when: 
+    - "'vault_primary' in group_names" 
+    - (vault_unseal_keys is not defined or vault_unseal_keys | length == 0)
+
+- name: Load existing Vault unseal keys
+  slurp:
+    src: /root/.vault-unseal-keys.json
+  register: vault_unseal_keys_content
+  when: 
+    - "'vault_primary' in group_names" 
+    - vault_unseal_keys_file.stat.exists and (vault_unseal_keys is not defined or vault_unseal_keys | length == 0)
+
+- name: Set vault_unseal_keys from file
+  set_fact:
+    vault_unseal_keys: "{{ vault_unseal_keys_content.content | b64decode | from_json }}"
+  when: 
+    - "'vault_primary' in group_names" 
+    - vault_unseal_keys_file.stat.exists and (vault_unseal_keys is not defined or vault_unseal_keys | length == 0)
+
+# Unseal Vault
+- name: Unseal Vault
+  command: vault operator unseal -address={{ vault_cluster_addr }} {{ item }}
+  with_items: "{{ vault_unseal_keys }}"
+  when: 
+    - "'vault_primary' in group_names" 
+    - vault_status.stdout is defined and (vault_status.stdout | from_json).sealed == true
+
+# Save Vault Root Token
+- name: Define vault_root_token as an empty string if not already set
+  set_fact:
+    vault_root_token: ""
+  when: 
+    - "'vault_primary' in group_names" 
+    - vault_root_token is not defined
+
+- name: Save Root Token
+  set_fact:
+    vault_root_token: "{{ vault_init.stdout | from_json | json_query('root_token') }}"
+  when: 
+    - "'vault_primary' in group_names" 
+    - vault_init.stdout is defined and vault_init.stdout | length > 0
+
+- name: Store Vault Root Token
+  copy:
+    dest: /root/.vault-root-token
+    content: "{{ vault_root_token }}"
+    mode: "0600"
+  when: 
+    - "'vault_primary' in group_names" 
+    - vault_root_token | length > 0
+
+# Load Vault Root Token (if not already loaded)
+- name: Check if Vault root token file exists
+  stat:
+    path: /root/.vault-root-token
+  register: vault_root_token_file
+  when: 
+    - "'vault_primary' in group_names" 
+    - (vault_root_token is not defined or vault_root_token | length == 0)
+
+- name: Load existing Vault root token
+  shell: cat /root/.vault-root-token
+  register: vault_root_token_content
+  when: 
+    - "'vault_primary' in group_names" 
+    - vault_root_token_file.stat.exists and (vault_root_token is not defined or vault_root_token | length == 0)
+  changed_when: false
+
+- name: Set vault_root_token from file
+  set_fact:
+    vault_root_token: "{{ vault_root_token_content.stdout }}"
+  when: 
+    - "'vault_primary' in group_names" 
+    - vault_root_token_file.stat.exists and (vault_root_token is not defined or vault_root_token | length == 0)
+
+# Secondary Join Vault Cluster
+- name: Distribute Vault Token to Secondary Nodes
+  set_fact:
+    vault_admin_token: "{{ hostvars[groups['vault_primary'][0]]['vault_root_token'] }}"
+  when: "'secondary' in group_names"
+
+- name: Check raft peers on secondary node
+  command: vault operator raft list-peers -address={{ vault_cluster_addr }} -format=json
+  environment:
+   VAULT_TOKEN: "{{ vault_admin_token }}"
+  register: raft_peers
+  changed_when: false
+  when: 
+    - "'secondary' in group_names" 
+    - vault_admin_token is defined and vault_admin_token | length > 0
+
+- name: Debug raft peers output on secondary
+  debug:
+    msg: "Raft peers output: {{ raft_peers.stdout | default('Command failed, rc=' ~ raft_peers.rc) }}"
+  when: "'secondary' in group_names"
+
+- name: Join Vault cluster on secondary if not already a member
+  command: vault operator raft join -address={{ vault_cluster_addr }}
+  environment:
+   VAULT_TOKEN: "{{ vault_admin_token }}"
+  when: 
+    - "'secondary' in group_names" 
+    - (
+        (raft_peers.stdout | default('{}') | from_json).get('peers', [])
+        | selectattr('node_id', 'equalto', ansible_hostname)
+        | list | length == 0
+      )
+
+# Finally
+- name: Check Vault version
+  command: vault --version
+  register: vault_version_output
+  changed_when: false
+
+- name: Display installed Vault version
+  debug:
+    msg: "Vault version installed: {{ vault_version_output.stdout }}"

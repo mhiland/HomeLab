@@ -1,0 +1,49 @@
+[Unit]
+Description=Node Exporter
+Documentation=https://prometheus.io/docs/guides/node-exporter/
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User={{ node_exporter_user }}
+Group={{ node_exporter_group }}
+ExecReload=/bin/kill -HUP $MAINPID
+ExecStart={{ node_exporter_binary_install_dir }}/node_exporter {{ node_exporter_args | join(' ') }}
+
+SyslogIdentifier=node_exporter
+Restart={{ restart_policy }}
+RestartSec={{ restart_delay }}
+NoNewPrivileges=yes
+
+# Security measures
+ProtectHome=yes
+ProtectSystem=strict
+ProtectHostname=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+RestrictNamespaces=yes
+
+# Allow access to system directories for monitoring
+ReadWritePaths={{ node_exporter_log_dir }}
+ReadOnlyPaths=/proc /sys /run
+
+# Network
+PrivateNetwork=no
+
+# Directories
+RuntimeDirectory=node_exporter
+RuntimeDirectoryMode=0755
+WorkingDirectory={{ node_exporter_log_dir }}
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

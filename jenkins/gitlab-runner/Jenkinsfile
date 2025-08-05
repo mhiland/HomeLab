@@ -1,0 +1,443 @@
+pipeline {
+    agent {
+        label 'ansible'
+    }
+
+    parameters {
+        choice(
+            name: 'ACTION_TYPE',
+            choices: ['build-and-deploy', 'build-only', 'deploy-only'],
+            description: 'build-and-deploy: full update | build-only: just build image | deploy-only: deploy existing image'
+        )
+        choice(
+            name: 'SERIAL_PERCENTAGE',
+            choices: ['25', '50', '75', '100'],
+            description: 'Percentage of Pi hosts to update simultaneously (recommended: 25-50%)'
+        )
+        booleanParam(
+            name: 'DRY_RUN',
+            defaultValue: false,
+            description: 'Run in check mode only (no actual changes to runners)'
+        )
+        string(
+            name: 'TARGET_HOSTS',
+            defaultValue: 'raspberrypi',
+            description: 'Ansible host pattern (raspberrypi, pi1, pi2, pi3, etc.)'
+        )
+        booleanParam(
+            name: 'SKIP_CONNECTIVITY_CHECK',
+            defaultValue: false,
+            description: 'Skip initial connectivity check'
+        )
+        booleanParam(
+            name: 'FORCE_REBUILD',
+            defaultValue: false,
+            description: 'Force rebuild of Docker image even if no changes detected'
+        )
+    }
+
+    environment {
+        ANSIBLE_HOST_KEY_CHECKING = 'False'
+        ANSIBLE_STDOUT_CALLBACK = 'yaml'
+        ANSIBLE_FORCE_COLOR = 'true'
+        ANSIBLE_RETRY_FILES_ENABLED = 'False'
+        ANSIBLE_ROLES_PATH = 'ansible/roles'
+        GITLAB_URL = 'https://gitlab.example.com'
+        REGISTRY_URL = 'registry.example.com'
+        IMAGE_NAME = 'homelab/gitlab-runner-ansible:latest'
+    }
+
+    stages {
+        stage('Preparation') {
+            steps {
+                script {
+                    echo "=== HomeLab GitLab Runner Maintenance ==="
+                    echo "Job: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+                    echo "Started: ${new Date()}"
+                    echo "Action Type: ${params.ACTION_TYPE}"
+                    echo "Serial Execution: ${params.SERIAL_PERCENTAGE}%"
+                    echo "Target Hosts: ${params.TARGET_HOSTS}"
+                    echo "Dry Run: ${params.DRY_RUN}"
+                    echo "Force Rebuild: ${params.FORCE_REBUILD}"
+
+                    // Set flags for conditional execution
+                    env.BUILD_IMAGE = (params.ACTION_TYPE == 'build-and-deploy' || params.ACTION_TYPE == 'build-only') ? 'true' : 'false'
+                    env.DEPLOY_RUNNERS = (params.ACTION_TYPE == 'build-and-deploy' || params.ACTION_TYPE == 'deploy-only') ? 'true' : 'false'
+                    
+                    echo "Will build image: ${env.BUILD_IMAGE}"
+                    echo "Will deploy runners: ${env.DEPLOY_RUNNERS}"
+
+                    // Safety warnings
+                    if (params.ACTION_TYPE == 'build-and-deploy' && !params.DRY_RUN) {
+                        echo "⚠️  WARNING: This will rebuild the GitLab Runner image and restart all runners"
+                        echo "⚠️  CI/CD jobs in progress may be interrupted"
+                        echo "⚠️  Consider running with DRY_RUN=true first to preview changes"
+                    }
+                }
+
+                // Setup inventory and GitLab token from Jenkins secrets
+                withCredentials([
+                    file(credentialsId: 'ansible-inventory-homelab', variable: 'INVENTORY_FILE'),
+                    string(credentialsId: 'gitlab-runner-token', variable: 'GITLAB_RUNNER_TOKEN')
+                ]) {
+                    dir('ansible') {
+                        sh 'mkdir -p inventories/homelab'
+                        sh 'cp "$INVENTORY_FILE" inventories/homelab/hosts'
+                        sh 'chmod 644 inventories/homelab/hosts'
+                        echo "✅ Inventory file copied successfully"
+                    }
+                    
+                    // Store token for later use
+                    env.GITLAB_RUNNER_TOKEN = env.GITLAB_RUNNER_TOKEN
+                    echo "✅ GitLab Runner token configured"
+                }
+            }
+        }
+
+        stage('Validate Environment') {
+            steps {
+                dir('ansible') {
+                    script {
+                        echo "=== Environment Validation ==="
+
+                        // Check required files
+                        if (!fileExists('inventories/homelab/hosts')) {
+                            error("Inventory file not found!")
+                        }
+                        
+                        if (env.BUILD_IMAGE == 'true' && !fileExists('../docker/gitlab-runner-ansible/Dockerfile')) {
+                            error("Dockerfile not found at docker/gitlab-runner-ansible/Dockerfile!")
+                        }
+                        
+                        if (env.DEPLOY_RUNNERS == 'true' && !fileExists('playbooks/update_gitlab_runner_monthly.yml')) {
+                            error("GitLab Runner playbook not found!")
+                        }
+
+                        echo "✅ All required files validated"
+                        echo "✅ Target pattern: ${params.TARGET_HOSTS}"
+                        echo "✅ Registry: ${env.REGISTRY_URL}"
+                    }
+                }
+            }
+        }
+
+        stage('Connectivity Check') {
+            when {
+                expression { !params.SKIP_CONNECTIVITY_CHECK }
+            }
+            steps {
+                dir('ansible') {
+                    script {
+                        echo "=== Connectivity Check ==="
+                        try {
+                            sh """
+                                docker run --rm \\
+                                    -v \$(pwd):/ansible \\
+                                    -v ~/.ssh:/root/.ssh:ro \\
+                                    -w /ansible \\
+                                    quay.io/ansible/ansible-runner:latest \\
+                                    ansible ${params.TARGET_HOSTS} \\
+                                    -m ping \\
+                                    -i inventories/homelab/hosts \\
+                                    --timeout=30
+                            """
+                            echo "✅ All target hosts are reachable"
+                        } catch (Exception e) {
+                            echo "❌ Some hosts failed connectivity check"
+                            echo "Error: ${e.getMessage()}"
+                            error("Connectivity check failed. Ensure all target hosts are accessible via SSH.")
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Pre-Update Info') {
+            when {
+                expression { env.DEPLOY_RUNNERS == 'true' && !params.DRY_RUN }
+            }
+            steps {
+                dir('ansible') {
+                    script {
+                        echo "=== Pre-Update GitLab Runner Status ==="
+                        try {
+                            sh """
+                                docker run --rm \\
+                                    -v \$(pwd):/ansible \\
+                                    -v ~/.ssh:/root/.ssh:ro \\
+                                    -w /ansible \\
+                                    quay.io/ansible/ansible-runner:latest \\
+                                    ansible ${params.TARGET_HOSTS} \\
+                                    -m shell \\
+                                    -a "docker ps --filter name=gitlab-runner --format 'table {{.Names}}\\t{{.Status}}\\t{{.Image}}'" \\
+                                    -i inventories/homelab/hosts \\
+                                    --timeout=30
+                            """
+                        } catch (Exception e) {
+                            echo "⚠️ Could not gather runner info from all hosts: ${e.getMessage()}"
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            when {
+                expression { env.BUILD_IMAGE == 'true' }
+            }
+            steps {
+                script {
+                    echo "=== Building GitLab Runner Docker Image ==="
+                    
+                    def extraVars = params.FORCE_REBUILD ? 
+                        "force_rebuild=true" : ""
+                    
+                    // Use our dedicated build playbook
+                    timeout(time: 30, unit: 'MINUTES') {
+                        sh """
+                            docker run --rm \\
+                                -v \$(pwd):/workspace \\
+                                -v /var/run/docker.sock:/var/run/docker.sock \\
+                                -v ~/.ssh:/root/.ssh:ro \\
+                                -w /workspace \\
+                                quay.io/ansible/ansible-runner:latest \\
+                                ansible-playbook ansible/playbooks/build_gitlab_runner_image.yml \\
+                                ${extraVars ? "--extra-vars '${extraVars}'" : ""} \\
+                                -v
+                        """
+                    }
+                    
+                    echo "✅ Docker image build completed"
+                }
+            }
+        }
+
+        stage('Deploy Updated Runners') {
+            when {
+                expression { env.DEPLOY_RUNNERS == 'true' }
+            }
+            steps {
+                dir('ansible') {
+                    script {
+                        echo "=== Deploying Updated GitLab Runners ==="
+
+                        def extraVarsString = "serial_percentage=${params.SERIAL_PERCENTAGE}"
+                        def limitString = params.TARGET_HOSTS != 'all' ? "--limit ${params.TARGET_HOSTS}" : ""
+                        def checkString = params.DRY_RUN ? "--check --diff" : ""
+
+                        echo "Extra vars: ${extraVarsString}"
+                        echo "Limit: ${params.TARGET_HOSTS}"
+                        echo "Check mode: ${params.DRY_RUN}"
+
+                        // Execute the update playbook with timeout
+                        timeout(time: 45, unit: 'MINUTES') {
+                            sh """
+                                docker run --rm \\
+                                    -v \$(pwd):/ansible \\
+                                    -v /var/run/docker.sock:/var/run/docker.sock \\
+                                    -v ~/.ssh:/root/.ssh:ro \\
+                                    -w /ansible \\
+                                    -e GITLAB_URL="${env.GITLAB_URL}" \\
+                                    -e GITLAB_RUNNER_TOKEN="${env.GITLAB_RUNNER_TOKEN}" \\
+                                    -e ANSIBLE_ROLES_PATH="${env.ANSIBLE_ROLES_PATH}" \\
+                                    quay.io/ansible/ansible-runner:latest \\
+                                    ansible-playbook playbooks/update_gitlab_runner_monthly.yml \\
+                                    -i inventories/homelab/hosts \\
+                                    --extra-vars "${extraVarsString}" \\
+                                    ${limitString} \\
+                                    ${checkString} \\
+                                    -v
+                            """
+                        }
+
+                        echo "✅ Runner deployment completed successfully"
+                    }
+                }
+            }
+        }
+
+        stage('Post-Update Verification') {
+            when {
+                expression { env.DEPLOY_RUNNERS == 'true' && !params.DRY_RUN }
+            }
+            steps {
+                dir('ansible') {
+                    script {
+                        echo "=== Post-Update Verification ==="
+
+                        // Check runner container status
+                        try {
+                            sh """
+                                docker run --rm \\
+                                    -v \$(pwd):/ansible \\
+                                    -v ~/.ssh:/root/.ssh:ro \\
+                                    -w /ansible \\
+                                    quay.io/ansible/ansible-runner:latest \\
+                                    ansible ${params.TARGET_HOSTS} \\
+                                    -m shell \\
+                                    -a "docker ps --filter name=gitlab-runner --format 'table {{.Names}}\\t{{.Status}}\\t{{.Image}}'" \\
+                                    -i inventories/homelab/hosts \\
+                                    --timeout=30
+                            """
+                            echo "✅ All runner containers are running with updated image"
+                        } catch (Exception e) {
+                            echo "⚠️ Some runners may have issues: ${e.getMessage()}"
+                        }
+
+                        // Verify runner registration
+                        echo "=== Verifying Runner Registration ==="
+                        try {
+                            sh """
+                                docker run --rm \\
+                                    -v \$(pwd):/ansible \\
+                                    -v ~/.ssh:/root/.ssh:ro \\
+                                    -w /ansible \\
+                                    quay.io/ansible/ansible-runner:latest \\
+                                    ansible ${params.TARGET_HOSTS} \\
+                                    -m shell \\
+                                    -a "docker exec gitlab-runner gitlab-runner verify" \\
+                                    -i inventories/homelab/hosts \\
+                                    --timeout=30
+                            """
+                            echo "✅ All runners verified successfully with GitLab"
+                        } catch (Exception e) {
+                            echo "⚠️ Some runners may need re-registration: ${e.getMessage()}"
+                        }
+
+                        // Test Ansible availability
+                        echo "=== Testing Ansible Availability ==="
+                        try {
+                            sh """
+                                docker run --rm \\
+                                    -v \$(pwd):/ansible \\
+                                    -v ~/.ssh:/root/.ssh:ro \\
+                                    -w /ansible \\
+                                    quay.io/ansible/ansible-runner:latest \\
+                                    ansible ${params.TARGET_HOSTS} \\
+                                    -m shell \\
+                                    -a "docker exec gitlab-runner ansible --version" \\
+                                    -i inventories/homelab/hosts \\
+                                    --timeout=30
+                            """
+                            echo "✅ Ansible is available in all runner containers"
+                        } catch (Exception e) {
+                            echo "⚠️ Ansible availability check failed: ${e.getMessage()}"
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Generate Summary') {
+            steps {
+                script {
+                    def summaryContent = """
+# HomeLab GitLab Runner Maintenance Summary
+
+**Job:** ${env.JOB_NAME} #${env.BUILD_NUMBER}
+**Started:** ${new Date()}
+**Action:** ${params.ACTION_TYPE}
+**Mode:** ${params.DRY_RUN ? 'DRY RUN' : 'LIVE EXECUTION'}
+
+## Configuration
+- **Serial Percentage:** ${params.SERIAL_PERCENTAGE}%
+- **Target Hosts:** ${params.TARGET_HOSTS}
+- **Image Built:** ${env.BUILD_IMAGE}
+- **Runners Deployed:** ${env.DEPLOY_RUNNERS}
+- **Force Rebuild:** ${params.FORCE_REBUILD}
+
+## Components Updated
+- **Docker Image:** ${env.REGISTRY_URL}/${env.IMAGE_NAME}
+- **GitLab URL:** ${env.GITLAB_URL}
+- **Target Hosts:** ${params.TARGET_HOSTS}
+
+## Execution Details
+- **Workspace:** ${env.WORKSPACE}
+- **Build URL:** ${env.BUILD_URL}
+- **Jenkins Environment:** Detected
+
+## Next Steps
+${params.DRY_RUN ?
+'- Review the changes above\\n- Run again with DRY_RUN=false to apply changes' :
+'- Monitor GitLab for runner availability\\n- Check CI/CD job execution\\n- Verify Ansible functionality in pipelines'}
+
+## Verification Commands
+```bash
+# Check runner status in GitLab
+# Visit: ${env.GITLAB_URL}/-/admin/runners
+
+# Verify runners locally
+ansible ${params.TARGET_HOSTS} -i inventories/homelab/hosts -m shell -a "docker ps --filter name=gitlab-runner"
+
+# Test Ansible in runners
+ansible ${params.TARGET_HOSTS} -i inventories/homelab/hosts -m shell -a "docker exec gitlab-runner ansible --version"
+```
+
+---
+*Generated by Jenkins Pipeline at ${new Date()}*
+"""
+
+                    writeFile file: "gitlab_runner_maintenance_${params.ACTION_TYPE}_${env.BUILD_NUMBER}.md",
+                             text: summaryContent
+
+                    echo summaryContent
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                echo "=== Archiving Artifacts ==="
+
+                def logPaths = [
+                    'logs/**/*',
+                    'ansible/logs/**/*',
+                    'ansible_logs/**/*',
+                    "gitlab_runner_maintenance_*.md"
+                ]
+
+                logPaths.each { pattern ->
+                    try {
+                        archiveArtifacts artifacts: pattern, allowEmptyArchive: true
+                    } catch (Exception e) {
+                        echo "No artifacts found matching: ${pattern}"
+                    }
+                }
+
+                // Clean up
+                dir('ansible') {
+                    sh 'find . -name "*.retry" -delete || true'
+                    sh 'rm -f inventories/homelab/hosts || true'
+                }
+            }
+        }
+        success {
+            script {
+                def message = params.DRY_RUN ?
+                    "✅ GitLab Runner ${params.ACTION_TYPE} DRY RUN completed successfully" :
+                    "✅ GitLab Runner ${params.ACTION_TYPE} completed successfully"
+                echo message
+                echo "Check ${env.GITLAB_URL}/-/admin/runners for runner status"
+
+                // Optional: Add notification logic here
+                // slackSend channel: '#homelab', message: message
+            }
+        }
+        failure {
+            script {
+                def message = "❌ GitLab Runner ${params.ACTION_TYPE} failed on ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+                echo message
+                echo "Check the console output and archived artifacts for details"
+
+                // Optional: Add notification logic here
+                // slackSend channel: '#homelab-alerts', message: message, color: 'danger'
+            }
+        }
+        unstable {
+            echo "⚠️ GitLab Runner ${params.ACTION_TYPE} completed with warnings"
+            echo "Some tasks may have failed but the overall process continued"
+        }
+    }
+}

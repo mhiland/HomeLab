@@ -1,0 +1,110 @@
+# Monitoring Group Variables
+# These variables override defaults for monitoring deployment
+#
+# PRIVATE CONFIGURATION SUPPORT:
+# This file supports private configuration variables from .local/homelab-private.yml
+# Private variables allow you to customize hostnames, IPs, and network settings
+# without committing sensitive infrastructure details to git.
+#
+# To use private config:
+# 1. Copy .local/homelab-private.yml.example to .local/homelab-private.yml
+# 2. Customize the values for your environment
+# 3. Load it in your playbooks with: vars_files: [".local/homelab-private.yml"]
+#
+# Variables with private config support:
+# - monitoring_targets.node_exporter (uses private_monitoring_targets.node_exporter)
+# - allowed_networks (uses private_networks.home_network and private_networks.docker_networks)  
+# - prometheus_scrape_configs_reference (uses private_prometheus_url)
+---
+
+# Node Exporter Configuration
+node_exporter_version: "1.7.0"
+node_exporter_port: 9100
+
+# Process Exporter Configuration
+process_exporter_enabled: false  # Set to true if you want process monitoring
+process_exporter_version: "0.7.10"
+process_exporter_port: 9256
+
+# Firewall Configuration
+firewall_enabled: true
+
+# Specific process monitoring for HomeLab environment
+process_exporter_config:
+  process_names:
+    - name: "vault"
+      cmdline: ["vault"]
+    - name: "sshd"
+      cmdline: ["sshd"]
+    - name: "systemd"
+      cmdline: ["systemd"]
+    - name: "ansible"
+      cmdline: ["ansible"]
+
+# Custom node exporter arguments for HomeLab
+node_exporter_args:
+  - "--web.listen-address=:{{ node_exporter_port }}"
+  - "--path.rootfs=/host"
+  - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc|run/docker/.+)($$|/)"
+  - "--collector.systemd"
+  - "--collector.processes"
+  - "--collector.systemd.unit-whitelist=(sshd|vault|nginx|apache2|systemd-.*).service"
+
+# Additional collectors to enable
+node_exporter_enabled_collectors:
+  - systemd
+  - processes
+  - textfile
+  - cpu
+  - diskstats
+  - filesystem
+  - loadavg
+  - meminfo
+  - netdev
+  - netstat
+  - stat
+  - time
+  - uname
+  - vmstat
+
+# Network and security settings with private config support
+# Uses private_networks from private config when available, otherwise falls back to generic examples
+allowed_networks:
+  - "{{ private_networks.home_network | default('192.168.1.0/24') }}"    # Home network
+  - "10.0.0.0/8"        # Internal networks
+  - "{{ private_networks.docker_networks | default('172.16.0.0/12') }}"  # Docker networks
+
+# Private Configuration Variables
+# These variables will be loaded from .local/homelab-private.yml if available
+# The private config allows you to customize hostnames and targets for your specific environment
+# See .local/homelab-private.yml.example for the complete structure
+
+# Monitoring targets configuration with private config support and fallbacks
+# Private config structure: private_monitoring_targets.node_exporter (list of targets)
+monitoring_targets:
+  node_exporter: "{{ private_monitoring_targets.node_exporter | default([
+    'pi1.local:9100',
+    'pi2.local:9100', 
+    'pi3.local:9100',
+    'pi4.local:9100',
+    'fedora-server.local:9100'
+  ]) }}"
+
+# Prometheus targets for reference (add these to your hosted Prometheus)
+# This configuration dynamically uses private_monitoring_targets when available,
+# otherwise falls back to generic examples
+prometheus_scrape_configs_reference: |
+  # Add these targets to your hosted Prometheus configuration at:
+  # {{ private_prometheus_url | default('https://prometheus.example.com/') }}
+  
+  scrape_configs:
+    - job_name: 'homelab-node-exporters'
+      static_configs:
+        - targets:
+          {% for target in monitoring_targets.node_exporter %}
+            - '{{ target }}'
+          {% endfor %}
+      scrape_interval: 15s
+      scrape_timeout: 10s
+      metrics_path: /metrics
+      scheme: http

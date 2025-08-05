@@ -1,0 +1,24 @@
+- name: Ensure certs directory exists on control node
+  delegate_to: localhost
+  file:
+    path: "{{ playbook_dir }}/certs"
+    state: directory
+    mode: '0755'
+
+- name: Sign the certificate using Internal CA
+  delegate_to: localhost
+  vars:
+    remote_host: "{{ hostvars[inventory_hostname].inventory_hostname }}"
+  command: >
+    openssl x509 -req 
+    -in "{{ playbook_dir }}/certs/{{ remote_host }}.csr"
+    -CA "{{ internal_ca_cert }}"
+    -CAkey "{{ internal_ca_key }}"
+    -CAcreateserial
+    -out "{{ playbook_dir }}/certs/{{ remote_host }}.crt"
+    -days "{{ cert_days }}"
+    -extfile "{{ playbook_dir }}/certs/openssl_{{ inventory_hostname }}.cnf"
+    -extensions v3_req
+    -sha256
+  args:
+    creates: "{{ playbook_dir }}/certs/{{ remote_host }}.crt"

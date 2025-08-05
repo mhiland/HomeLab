@@ -1,0 +1,85 @@
+---
+# Python Management Role - Standardized Python Symlink Management
+
+- name: Get system Python version
+  command: /usr/bin/python3 --version
+  register: system_python_version
+  changed_when: false
+
+- name: Display system Python status
+  debug:
+    msg: |
+      System Python Analysis:
+      - System Python: {{ system_python_version.stdout }}
+      - Target managed path: {{ python_executable }}
+      - Strategy: Create standardized symlink to system Python
+
+- name: Create managed Python directory structure
+  file:
+    path: "{{ python_install_prefix }}/bin"
+    state: directory
+    mode: '0755'
+
+- name: Check if managed Python symlink exists
+  stat:
+    path: "{{ python_executable }}"
+  register: managed_python_stat
+
+- name: Create managed Python symlink
+  file:
+    src: /usr/bin/python3
+    dest: "{{ python_executable }}"
+    state: link
+    force: yes
+  register: python_symlink_created
+
+- name: Create managed pip symlink
+  file:
+    src: /usr/bin/pip3
+    dest: "{{ pip_executable }}"
+    state: link
+    force: yes
+  when: python_symlink_created is changed
+
+- name: Create python (no version) symlink for compatibility
+  file:
+    src: "{{ python_executable }}"
+    dest: "{{ python_install_prefix }}/bin/python"
+    state: link
+    force: yes
+  when: python_symlink_created is changed
+
+- name: Verify managed Python installation
+  command: "{{ python_executable }} --version"
+  register: final_python_version
+  changed_when: false
+
+- name: Verify managed pip installation
+  command: "{{ pip_executable }} --version"
+  register: final_pip_version
+  changed_when: false
+  failed_when: false
+
+- name: Add managed Python to system PATH
+  lineinfile:
+    path: /etc/environment
+    regexp: '^PATH='
+    line: 'PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:{{ python_install_prefix }}/bin"'
+    backup: yes
+  when: python_symlink_created is changed
+
+- name: Display final installation status
+  debug:
+    msg: |
+      Python Management Installation Complete:
+      - System Python: {{ system_python_version.stdout }}
+      - Managed Python: {{ final_python_version.stdout }}
+      - Managed Path: {{ python_executable }}
+      - Pip Available: {{ 'YES' if final_pip_version.rc == 0 else 'NO' }}
+      - Strategy: Symlink to system Python
+
+- name: Create version enforcement facts
+  set_fact:
+    managed_python_version: "{{ final_python_version.stdout }}"
+    managed_python_path: "{{ python_executable }}"
+    system_python_version: "{{ system_python_version.stdout }}"

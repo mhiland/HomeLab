@@ -1,0 +1,18 @@
+---
+# Monitoring Role Handlers
+
+- name: reload systemd
+  systemd:
+    daemon_reload: yes
+
+- name: restart node_exporter
+  systemd:
+    name: node_exporter
+    state: restarted
+  when: node_exporter_binary.stat.exists or download_result is defined
+
+- name: restart process-exporter
+  systemd:
+    name: process-exporter
+    state: restarted
+  when: process_exporter_enabled and (process_exporter_binary.stat.exists or download_result_process is defined)

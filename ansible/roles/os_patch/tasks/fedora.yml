@@ -1,0 +1,90 @@
+- name: Update dnf cache on Fedora systems
+  dnf:
+    update_cache: yes
+  async: "{{ operation_timeout }}"
+  poll: 10
+  retries: "{{ max_retries }}"
+  delay: "{{ retry_delay_base }}"
+  register: dnf_update
+
+- name: Run autoremove to clean up unused packages
+  dnf:
+    autoremove: yes
+  async: "{{ operation_timeout }}"
+  poll: 10
+  retries: "{{ max_retries }}"
+  delay: "{{ retry_delay_base }}"
+  register: dnf_autoremove
+
+- name: Run nightly patching on Fedora systems (security updates only)
+  dnf:
+    name: '*'
+    state: latest
+    security: yes
+  async: "{{ operation_timeout }}"
+  poll: 10
+  retries: "{{ max_retries }}"
+  delay: "{{ retry_delay_base }}"
+  when: patching_type == 'nightly'
+  register: patch_result
+
+- name: Run monthly full upgrade on Fedora systems
+  dnf:
+    name: '*'
+    state: latest
+  async: "{{ operation_timeout }}"
+  poll: 10
+  retries: "{{ max_retries }}"
+  delay: "{{ retry_delay_base }}"
+  when: patching_type == 'monthly'
+  register: patch_result
+
+- name: Create log directory
+  file:
+    path: "{{ log_directory }}"
+    state: directory
+    mode: '0755'
+  delegate_to: localhost
+  run_once: true
+  when: jenkins_log_format
+  become: no
+
+- name: Generate detailed log output
+  copy:
+    content: |
+      Ansible Patching Summary - {{ ansible_date_time.iso8601 }}
+      ============================================
+      Host: {{ inventory_hostname }}
+      Patching Type: {{ patching_type }}
+      User: {{ ansible_user_id }}
+      
+      DNF Update Result:
+      {{ dnf_update | to_nice_json }}
+      
+      Autoremove Result:
+      {{ dnf_autoremove | to_nice_json }}
+      
+      Patch Result:
+      {{ patch_result | to_nice_json }}
+      
+      System Information:
+      OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+      Kernel: {{ ansible_kernel }}
+      Architecture: {{ ansible_architecture }}
+      
+    dest: "{{ log_directory }}/{{ inventory_hostname }}_{{ patching_type }}_{{ ansible_date_time.epoch }}.log"
+  delegate_to: localhost
+  when: jenkins_log_format
+  become: no
+
+- name: Display patch results
+  debug:
+    msg: |
+      Patching completed on {{ inventory_hostname }}
+      Type: {{ patching_type }}
+      Status: {{ 'SUCCESS' if patch_result is succeeded else 'FAILED' }}
+      {% if patch_result.changed %}
+      Packages updated: {{ patch_result.results | length if patch_result.results is defined else 'Unknown' }}
+      {% else %}
+      No packages were updated
+      {% endif %}

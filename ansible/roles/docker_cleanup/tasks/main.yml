@@ -1,0 +1,152 @@
+---
+# Docker cleanup tasks
+
+- name: Check if Docker is installed and running
+  command: docker --version
+  register: docker_version
+  failed_when: false
+  changed_when: false
+
+- name: Skip cleanup if Docker not available
+  debug:
+    msg: "Docker not available on {{ inventory_hostname }}, skipping cleanup"
+  when: docker_version.rc != 0
+
+- name: Check Docker daemon status
+  command: docker info
+  register: docker_info
+  failed_when: false
+  changed_when: false
+  when: docker_version.rc == 0
+
+- name: Skip cleanup if Docker daemon not running
+  debug:
+    msg: "Docker daemon not running on {{ inventory_hostname }}, skipping cleanup"
+  when: 
+    - docker_version.rc == 0
+    - docker_info.rc != 0
+
+- name: Get initial disk usage (before cleanup)
+  shell: docker system df --format "table {{.Type}}\t{{.TotalCount}}\t{{.Size}}\t{{.Reclaimable}}" | grep -E "(Images|Containers|Build Cache)" | tail -3
+  register: docker_disk_before
+  failed_when: false
+  changed_when: false
+  when: 
+    - docker_cleanup_enabled
+    - docker_version.rc == 0
+    - docker_info.rc == 0
+    - docker_cleanup_log_space
+
+- name: Clean up stopped containers
+  command: docker container prune -f
+  register: container_cleanup
+  failed_when: false
+  when: 
+    - docker_cleanup_enabled
+    - docker_cleanup_containers
+    - docker_version.rc == 0
+    - docker_info.rc == 0
+
+- name: Clean up dangling/orphaned images
+  command: docker image prune -f
+  register: image_cleanup
+  failed_when: false
+  when: 
+    - docker_cleanup_enabled
+    - docker_cleanup_images
+    - docker_version.rc == 0
+    - docker_info.rc == 0
+
+- name: Clean up unused networks
+  command: docker network prune -f
+  register: network_cleanup
+  failed_when: false
+  when: 
+    - docker_cleanup_enabled
+    - docker_cleanup_networks
+    - docker_version.rc == 0
+    - docker_info.rc == 0
+
+- name: Clean up build cache
+  command: docker builder prune -f
+  register: build_cache_cleanup
+  failed_when: false
+  when: 
+    - docker_cleanup_enabled
+    - docker_cleanup_build_cache
+    - docker_version.rc == 0
+    - docker_info.rc == 0
+
+- name: Clean up unused volumes (CAUTION - disabled by default)
+  command: docker volume prune -f
+  register: volume_cleanup
+  failed_when: false
+  when: 
+    - docker_cleanup_enabled
+    - docker_cleanup_volumes
+    - docker_version.rc == 0
+    - docker_info.rc == 0
+
+- name: Get final disk usage (after cleanup)
+  shell: docker system df --format "table {{.Type}}\t{{.TotalCount}}\t{{.Size}}\t{{.Reclaimable}}" | grep -E "(Images|Containers|Build Cache)" | tail -3
+  register: docker_disk_after
+  failed_when: false
+  changed_when: false
+  when: 
+    - docker_cleanup_enabled
+    - docker_version.rc == 0
+    - docker_info.rc == 0
+    - docker_cleanup_log_space
+
+- name: Display cleanup results
+  debug:
+    msg: |
+      === Docker Cleanup Results for {{ inventory_hostname }} ===
+      
+      Docker Status: {{ 'Available' if docker_version.rc == 0 else 'Not Available' }}
+      {% if docker_version.rc == 0 %}
+      Daemon Status: {{ 'Running' if docker_info.rc == 0 else 'Not Running' }}
+      {% endif %}
+      
+      {% if docker_cleanup_enabled and docker_version.rc == 0 and docker_info.rc == 0 %}
+      Cleanup Operations:
+      {% if docker_cleanup_containers and container_cleanup is defined %}
+      - Containers: {{ 'SUCCESS' if container_cleanup.rc == 0 else 'FAILED' }}
+      {% endif %}
+      {% if docker_cleanup_images and image_cleanup is defined %}
+      - Images: {{ 'SUCCESS' if image_cleanup.rc == 0 else 'FAILED' }}
+      {% endif %}
+      {% if docker_cleanup_networks and network_cleanup is defined %}
+      - Networks: {{ 'SUCCESS' if network_cleanup.rc == 0 else 'FAILED' }}
+      {% endif %}
+      {% if docker_cleanup_build_cache and build_cache_cleanup is defined %}
+      - Build Cache: {{ 'SUCCESS' if build_cache_cleanup.rc == 0 else 'FAILED' }}
+      {% endif %}
+      {% if docker_cleanup_volumes and volume_cleanup is defined %}
+      - Volumes: {{ 'SUCCESS' if volume_cleanup.rc == 0 else 'FAILED' }}
+      {% endif %}
+      
+      {% if docker_cleanup_log_space and docker_disk_before is defined and docker_disk_after is defined %}
+      Disk Usage Before:
+      {{ docker_disk_before.stdout }}
+      
+      Disk Usage After:
+      {{ docker_disk_after.stdout }}
+      {% endif %}
+      {% else %}
+      Cleanup Status: SKIPPED (Docker not available or cleanup disabled)
+      {% endif %}
+  when: docker_version is defined
+
+- name: Set cleanup result facts
+  set_fact:
+    docker_cleanup_result: 
+      enabled: "{{ docker_cleanup_enabled }}"
+      docker_available: "{{ docker_version.rc == 0 if docker_version is defined else false }}"
+      daemon_running: "{{ docker_info.rc == 0 if docker_info is defined else false }}"
+      containers_cleaned: "{{ container_cleanup.rc == 0 if container_cleanup is defined else false }}"
+      images_cleaned: "{{ image_cleanup.rc == 0 if image_cleanup is defined else false }}"
+      networks_cleaned: "{{ network_cleanup.rc == 0 if network_cleanup is defined else false }}"
+      build_cache_cleaned: "{{ build_cache_cleanup.rc == 0 if build_cache_cleanup is defined else false }}"
+      volumes_cleaned: "{{ volume_cleanup.rc == 0 if volume_cleanup is defined else false }}"
+  when: docker_version is defined

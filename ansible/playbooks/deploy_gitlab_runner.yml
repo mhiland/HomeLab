@@ -1,0 +1,58 @@
+---
+- name: Deploy GitLab Runner with Docker on Raspberry Pi cluster
+  hosts: raspberrypi
+  become: yes
+  gather_facts: yes
+
+  pre_tasks:
+    - name: Verify Docker is installed
+      command: docker --version
+      register: docker_check
+      changed_when: false
+      failed_when: docker_check.rc != 0
+
+    - name: Check Docker service status
+      systemd:
+        name: docker
+        state: started
+      check_mode: yes
+      register: docker_service_check
+
+    - name: Verify environment variables are set
+      assert:
+        that:
+          - lookup('env', 'GITLAB_URL') != ''
+          - lookup('env', 'GITLAB_RUNNER_TOKEN') != ''
+        fail_msg: |
+          Required environment variables are not set.
+          Please export:
+            export GITLAB_URL="https://your-gitlab-instance.com"
+            export GITLAB_RUNNER_TOKEN="glrt-xxxxxxxxxxxxx"
+
+    - name: Display GitLab URL (without token for security)
+      debug:
+        msg: "Will register runners to: {{ lookup('env', 'GITLAB_URL') }}"
+
+  roles:
+    - gitlab_runner_docker
+
+  post_tasks:
+    - name: Check all runner containers status
+      command: docker ps --filter "name=gitlab-runner" --format "table {% raw %}{{.Names}}\t{{.Status}}\t{{.Image}}{% endraw %}"
+      register: runner_status
+      changed_when: false
+
+    - name: Display runner container status
+      debug:
+        msg: "{{ runner_status.stdout_lines }}"
+
+    - name: Test runner connectivity
+      command: >
+        docker exec gitlab-runner gitlab-runner verify
+      register: runner_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Display runner verification result
+      debug:
+        msg: "Runner verification: {{ 'SUCCESS' if runner_verify.rc == 0 else 'FAILED - Check logs with: docker logs gitlab-runner' }}"

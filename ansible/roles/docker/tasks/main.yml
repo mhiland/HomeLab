@@ -1,0 +1,109 @@
+---
+- name: Install required system packages
+  apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+      - python3-pip
+    state: present
+    update_cache: yes
+  become: yes
+
+- name: Create directory for Docker GPG key
+  file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+  become: yes
+
+- name: Add Docker GPG key (modern method)
+  get_url:
+    url: "{{ docker_apt_gpg_key }}"
+    dest: /etc/apt/keyrings/docker.asc
+    mode: '0644'
+    force: true
+  become: yes
+
+- name: Set Docker repository codename
+  set_fact:
+    docker_repo_codename: "{{ 'bookworm' if ansible_distribution == 'Kali' else ansible_distribution_release }}"
+
+- name: Add Docker repository (modern method)
+  apt_repository:
+    repo: "deb [arch={{ docker_apt_arch }} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian {{ docker_repo_codename }} {{ docker_apt_release_channel }}"
+    state: present
+    update_cache: yes
+  become: yes
+
+- name: Install Docker CE
+  apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+    state: "{{ docker_package_state }}"
+    update_cache: yes
+  become: yes
+  notify: restart docker
+
+- name: Install Docker SDK for Python (via apt)
+  apt:
+    name:
+      - python3-docker
+      - python3-compose
+    state: present
+  become: yes
+
+- name: Ensure Docker daemon directory exists
+  file:
+    path: /etc/docker
+    state: directory
+    mode: '0755'
+  become: yes
+
+- name: Configure Docker daemon
+  copy:
+    content: "{{ docker_daemon_options | to_nice_json }}"
+    dest: /etc/docker/daemon.json
+    mode: '0644'
+  become: yes
+  notify: restart docker
+
+- name: Ensure Docker is started and enabled
+  service:
+    name: docker
+    state: "{{ docker_service_state }}"
+    enabled: "{{ docker_service_enabled }}"
+  become: yes
+
+- name: Add users to docker group
+  user:
+    name: "{{ item }}"
+    groups: docker
+    append: yes
+  with_items: "{{ docker_users }}"
+  become: yes
+
+- name: Install Docker Compose standalone (optional)
+  get_url:
+    url: "https://github.com/docker/compose/releases/download/v{{ docker_compose_version }}/docker-compose-linux-aarch64"
+    dest: "{{ docker_compose_path }}"
+    mode: '0755'
+  become: yes
+  when: docker_install_compose
+
+- name: Verify Docker installation
+  command: docker version
+  register: docker_version
+  changed_when: false
+  failed_when: false
+
+- name: Display Docker version
+  debug:
+    msg: "Docker installed successfully: {{ docker_version.stdout_lines[0] | default('Version info not available') }}"
+  when: docker_version.rc == 0

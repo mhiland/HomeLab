@@ -1,0 +1,161 @@
+---
+# Python Management Deployment Playbook
+# Deploys standardized Python 3.11 across all HomeLab hosts
+# Run this BEFORE updating inventory to use managed Python interpreter
+
+- hosts: all
+  become: yes
+  gather_facts: yes
+  serial: "{{ serial_percentage | default(50) }}%"
+  vars:
+    deployment_type: python_management
+    log_directory: "{{ workspace_dir }}/python_deployment"
+    workspace_dir: "{{ lookup('env', 'WORKSPACE') or './logs' }}"
+    
+  pre_tasks:
+    - name: Display deployment information
+      debug:
+        msg: |
+          === Python Management Deployment ===
+          Host: {{ inventory_hostname }}
+          Target: Python 3.11 to /opt/python3.11/
+          Current system Python: {{ ansible_python_version }}
+          Architecture: {{ ansible_architecture }}
+          Serial execution: {{ serial_percentage | default(50) }}%
+          
+    - name: Validate SSH connectivity
+      ping:
+      
+    - name: Check available disk space
+      shell: df -h /opt | tail -1 | awk '{print $4}'
+      register: opt_disk_space
+      changed_when: false
+      
+    - name: Parse disk space information
+      set_fact:
+        disk_space_value: "{{ opt_disk_space.stdout | regex_replace('[^0-9.]', '') | float }}"
+        disk_space_unit: "{{ opt_disk_space.stdout | regex_replace('[0-9.]', '') }}"
+      when: opt_disk_space.stdout is defined
+      
+    - name: Ensure sufficient disk space (need ~500MB)
+      fail:
+        msg: "Insufficient disk space in /opt: {{ opt_disk_space.stdout }} (need at least 500MB)"
+      when: 
+        - opt_disk_space.stdout is defined
+        - >
+          (disk_space_unit == 'K') or
+          (disk_space_unit == 'M' and disk_space_value | float < 500)
+        
+    - name: Create log directory
+      file:
+        path: "{{ log_directory }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      run_once: true
+      become: no
+      
+  roles:
+    - python_management
+    
+  post_tasks:
+    - name: Test managed Python installation
+      command: /opt/python3.11/bin/python3 --version
+      register: test_python_version
+      changed_when: false
+      failed_when: false
+      
+    - name: Test managed pip installation
+      command: /opt/python3.11/bin/pip3 --version
+      register: test_pip_version
+      changed_when: false
+      failed_when: false
+      
+    - name: Test Ansible compatibility with managed Python
+      command: /opt/python3.11/bin/python3 -c "import json, os, sys; print('Ansible-compatible Python ready')"
+      register: test_ansible_compat
+      changed_when: false
+      failed_when: false
+      
+    - name: Record deployment status
+      set_fact:
+        deployment_issues: >-
+          {{
+            ([] if test_python_version.rc == 0 else ['Python executable test failed']) +
+            ([] if test_pip_version.rc == 0 else ['Pip executable test failed']) +
+            ([] if test_ansible_compat.rc == 0 else ['Ansible compatibility test failed'])
+          }}
+      
+    - name: Generate deployment summary
+      copy:
+        content: |
+          # Python Management Deployment Summary
+          
+          **Host:** {{ inventory_hostname }}  
+          **Deployment Date:** {{ ansible_date_time.iso8601 }}  
+          **Architecture:** {{ ansible_architecture }}  
+          
+          ## System Information
+          - **OS:** {{ ansible_distribution }} {{ ansible_distribution_version }}
+          - **Kernel:** {{ ansible_kernel }}
+          - **System Python:** {{ ansible_python_version }}
+          
+          ## Managed Python Installation
+          - **Version:** {{ test_python_version.stdout | default('FAILED') }}
+          - **Path:** /opt/python3.11/bin/python3
+          - **Pip Version:** {{ test_pip_version.stdout | default('FAILED') }}
+          - **Ansible Compatible:** {{ 'YES' if test_ansible_compat.rc == 0 else 'FAILED' }}
+          
+          ## Deployment Status
+          {% if deployment_issues | length == 0 %}
+          - **Status:** ✓ SUCCESS - All tests passed
+          {% else %}
+          - **Status:** ✗ FAILED - Issues detected:
+          {% for issue in deployment_issues %}
+            - {{ issue }}
+          {% endfor %}
+          {% endif %}
+          
+          ## Next Steps
+          1. Update inventory: `ansible_python_interpreter: /opt/python3.11/bin/python3`
+          2. Test Ansible connectivity with new interpreter
+          3. Deploy version enforcement to patching jobs
+          
+        dest: "{{ log_directory }}/{{ inventory_hostname }}_python_deployment.md"
+      delegate_to: localhost
+      become: no
+      
+    - name: Display completion status
+      debug:
+        msg: |
+          === Python Management Deployment Complete ===
+          Host: {{ inventory_hostname }}
+          {% if deployment_issues | length == 0 %}
+          Status: ✓ SUCCESS - Managed Python: {{ test_python_version.stdout }}
+          IMPORTANT: Update inventory configuration to use managed Python:
+          ansible_python_interpreter: /opt/python3.11/bin/python3
+          {% else %}
+          Status: ✗ FAILED - Issues detected:
+          {% for issue in deployment_issues %}
+          - {{ issue }}
+          {% endfor %}
+          Check logs and re-run deployment if needed.
+          {% endif %}
+          
+    # Fail at the end if deployment issues detected (after all hosts processed their roles)
+    - name: Fail if deployment issues detected
+      fail:
+        msg: |
+          CRITICAL: Python deployment failed on {{ inventory_hostname }}
+          
+          Issues found:
+          {% for issue in deployment_issues %}
+          - {{ issue }}
+          {% endfor %}
+          
+          Actions required:
+          1. Check build logs and system resources
+          2. Verify disk space and dependencies
+          3. Re-run deploy_python_management.yml playbook
+          4. Contact administrator if issues persist
+      when: deployment_issues is defined and deployment_issues | length > 0

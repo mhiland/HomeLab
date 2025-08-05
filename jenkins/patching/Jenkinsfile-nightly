@@ -1,0 +1,211 @@
+pipeline {
+    agent {
+        label 'ansible'
+    }
+
+    triggers {
+        // Run every night at 2:00 AM
+        cron('H 2 * * *')
+    }
+
+    parameters {
+        choice(
+            name: 'SERIAL_PERCENTAGE',
+            choices: ['25', '50', '75', '100'],
+            description: 'Percentage of hosts to patch simultaneously'
+        )
+        booleanParam(
+            name: 'DRY_RUN',
+            defaultValue: false,
+            description: 'Run in check mode only (no actual changes)'
+        )
+        string(
+            name: 'TARGET_HOSTS',
+            defaultValue: 'all',
+            description: 'Ansible host pattern (all, raspberrypi, fedora, pi1, etc.)'
+        )
+        string(
+            name: 'BRANCH',
+            defaultValue: '*/main',
+            description: 'Git branch to use for playbooks (default: */main)'
+        )
+    }
+
+    environment {
+        ANSIBLE_HOST_KEY_CHECKING = 'False'
+        ANSIBLE_STDOUT_CALLBACK = 'yaml'
+        ANSIBLE_FORCE_COLOR = 'true'
+        ANSIBLE_RETRY_FILES_ENABLED = 'False'
+        PATCHING_TYPE = 'nightly'
+        PLAYBOOK = 'playbooks/patch_systems_nightly.yml'
+    }
+
+    stages {
+        stage('Preparation') {
+            steps {
+                script {
+                    echo "=== HomeLab Nightly Patching ==="
+                    echo "Job: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+                    echo "Started: ${new Date()}"
+                    echo "Type: Safe security updates only"
+                    echo "Serial Execution: ${params.SERIAL_PERCENTAGE}%"
+                    echo "Target Hosts: ${params.TARGET_HOSTS}"
+                    echo "Branch: ${params.BRANCH}"
+                    echo "Dry Run: ${params.DRY_RUN}"
+                    echo "Playbook: ${env.PLAYBOOK}"
+                }
+
+                // Setup inventory from Jenkins secret
+                withCredentials([file(credentialsId: 'ansible-inventory-homelab', variable: 'INVENTORY_FILE')]) {
+                    dir('ansible') {
+                        sh 'mkdir -p inventories/homelab'
+                        sh 'cp "$INVENTORY_FILE" inventories/homelab/hosts'
+                        sh 'chmod 644 inventories/homelab/hosts'
+                        echo "✅ Inventory file copied successfully"
+                    }
+                }
+            }
+        }
+
+        stage('Connectivity Check') {
+            steps {
+                dir('ansible') {
+                    withCredentials([sshUserPrivateKey(credentialsId: 'ansible-ssh-key', keyFileVariable: 'SSH_KEY_FILE', usernameVariable: 'SSH_USER')]) {
+                        script {
+                            echo "=== Connectivity Check ==="
+                            try {
+                                sh """
+                                    ansible ${params.TARGET_HOSTS != 'all' ? params.TARGET_HOSTS : 'all'} \\
+                                        -m ping \\
+                                        -i inventories/homelab/hosts \\
+                                        --private-key "\${SSH_KEY_FILE}" \\
+                                        --user "\${SSH_USER}" \\
+                                        --timeout=30
+                                """
+                                echo "✅ All target hosts are reachable"
+                            } catch (Exception e) {
+                                echo "❌ Some hosts failed connectivity check"
+                                echo "Error: ${e.getMessage()}"
+                                error("Connectivity check failed. Ensure all target hosts are accessible via SSH.")
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Execute Nightly Patching') {
+            steps {
+                dir('ansible') {
+                    withCredentials([sshUserPrivateKey(credentialsId: 'ansible-ssh-key', keyFileVariable: 'SSH_KEY_FILE', usernameVariable: 'SSH_USER')]) {
+                        script {
+                            echo "=== Starting Nightly Patching (Safe Updates Only) ==="
+
+                            def extraVarsString = "serial_percentage=${params.SERIAL_PERCENTAGE} patching_type=nightly"
+                            def limitString = params.TARGET_HOSTS != 'all' ? "--limit ${params.TARGET_HOSTS}" : ""
+                            def checkString = params.DRY_RUN ? "--check --diff" : ""
+
+                            echo "Extra vars: ${extraVarsString}"
+                            echo "Limit: ${params.TARGET_HOSTS != 'all' ? params.TARGET_HOSTS : 'none'}"
+                            echo "Check mode: ${params.DRY_RUN}"
+
+                            // Execute nightly patching with timeout
+                            timeout(time: 30, unit: 'MINUTES') {
+                                sh """
+                                    ANSIBLE_ROLES_PATH=roles ansible-playbook ${env.PLAYBOOK} \\
+                                        -i inventories/homelab/hosts \\
+                                        --extra-vars "${extraVarsString}" \\
+                                        --private-key "\${SSH_KEY_FILE}" \\
+                                        --user "\${SSH_USER}" \\
+                                        ${limitString} \\
+                                        ${checkString} \\
+                                        -v
+                                """
+                            }
+
+                            echo "✅ Nightly patching completed successfully"
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Post-Patching Verification') {
+            when {
+                expression { !params.DRY_RUN }
+            }
+            steps {
+                dir('ansible') {
+                    withCredentials([sshUserPrivateKey(credentialsId: 'ansible-ssh-key', keyFileVariable: 'SSH_KEY_FILE', usernameVariable: 'SSH_USER')]) {
+                        script {
+                            echo "=== Post-Patching Verification ==="
+
+                            // Quick connectivity check
+                            try {
+                                sh """
+                                    ansible ${params.TARGET_HOSTS != 'all' ? params.TARGET_HOSTS : 'all'} \\
+                                        -m ping \\
+                                        -i inventories/homelab/hosts \\
+                                        --private-key "\${SSH_KEY_FILE}" \\
+                                        --user "\${SSH_USER}" \\
+                                        --timeout=30
+                                """
+                                echo "✅ All hosts remain accessible after patching"
+                            } catch (Exception e) {
+                                echo "⚠️ Some hosts may have connectivity issues after patching"
+                            }
+
+                            // Check system status
+                            try {
+                                sh """
+                                    ansible ${params.TARGET_HOSTS != 'all' ? params.TARGET_HOSTS : 'all'} \\
+                                        -m shell \\
+                                        -a "uptime && echo 'Reboot check:' && test -f /var/run/reboot-required && echo 'REBOOT_REQUIRED' || echo 'NO_REBOOT_NEEDED'" \\
+                                        -i inventories/homelab/hosts \\
+                                        --private-key "\${SSH_KEY_FILE}" \\
+                                        --user "\${SSH_USER}" \\
+                                        --timeout=30
+                                """
+                            } catch (Exception e) {
+                                echo "Could not get status from all hosts: ${e.getMessage()}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                echo "=== Archiving Artifacts ==="
+                def logPaths = [
+                    'logs/**/*',
+                    'ansible/logs/**/*',
+                    'ansible_logs/**/*'
+                ]
+
+                logPaths.each { pattern ->
+                    try {
+                        archiveArtifacts artifacts: pattern, allowEmptyArchive: true
+                    } catch (Exception e) {
+                        echo "No artifacts found matching: ${pattern}"
+                    }
+                }
+
+                // Clean up
+                dir('ansible') {
+                    sh 'find . -name "*.retry" -delete || true'
+                    sh 'rm -f inventories/homelab/hosts || true'
+                }
+            }
+        }
+        success {
+            echo "✅ Nightly patching completed successfully"
+        }
+        failure {
+            echo "❌ Nightly patching failed on ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+        }
+    }
+}

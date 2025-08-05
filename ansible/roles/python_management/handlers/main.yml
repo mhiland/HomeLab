@@ -1,0 +1,12 @@
+---
+# Python Management Role - Handlers
+
+- name: restart services using python
+  debug:
+    msg: "Python has been updated - services may need to be restarted"
+  listen: "python updated"
+
+- name: update ldconfig
+  command: ldconfig
+  become: yes
+  listen: "python updated"

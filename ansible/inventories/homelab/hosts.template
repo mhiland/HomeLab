@@ -1,0 +1,22 @@
+[all:children]
+raspberrypi
+fedora
+vault_primary
+vault_secondary
+
+[raspberrypi]
+# Replace 'your-username' with your actual SSH username
+pi1 ansible_host=192.168.1.101 ansible_user=your-username
+pi2 ansible_host=192.168.1.102 ansible_user=your-username
+pi3 ansible_host=192.168.1.103 ansible_user=your-username
+pi4 ansible_host=192.168.1.104 ansible_user=your-username
+
+[fedora]
+# Update IP address and add ansible_user if needed
+fedora_server ansible_host=192.168.1.105 ansible_user=your-username
+
+[vault_primary]
+pi3 ansible_host=192.168.1.103
+
+[vault_secondary]
+pi1 ansible_host=192.168.1.101

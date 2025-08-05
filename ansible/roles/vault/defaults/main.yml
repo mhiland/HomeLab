@@ -1,0 +1,8 @@
+vault_config_path: /etc/vault.d/vault.hcl
+vault_service_name: vault
+vault_fqdn: vault
+vault_bind_addr: "0.0.0.0:8200"
+vault_cluster_addr: "https://{{ ansible_fqdn }}:8200"
+vault_storage_path: /opt/vault/data
+vault_version: "1.18.4"
+vault_version_sha256sum: "19ab068acb3b25c1d049405401b35b4083877190714bfbddeaadcbd4f26d23d2"

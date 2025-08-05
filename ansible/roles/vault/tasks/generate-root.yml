@@ -1,0 +1,44 @@
+- name: Check for existing Vault root token
+  stat:
+    path: /root/.vault-root-token
+  register: vault_token_file
+
+- name: Load Vault root token if present
+  shell: cat /root/.vault-root-token
+  register: vault_root_token
+  when: vault_token_file.stat.exists
+
+- name: Verify loaded token validity
+  command: vault token lookup -address={{ vault_cluster_addr }}
+  environment:
+    VAULT_TOKEN: "{{ vault_root_token.stdout | default('') }}"
+  register: vault_token_status
+  ignore_errors: yes
+  when: vault_root_token.stdout is defined
+
+- name: Set valid token for further operations
+  set_fact:
+    VAULT_TOKEN: "{{ vault_root_token.stdout }}"
+  when: vault_token_status.rc == 0
+
+- name: Initiate generate-root if token is missing or invalid
+  command: vault operator generate-root -init -address={{ vault_cluster_addr }}
+  register: vault_root_init
+  when: vault_token_status.rc != 0 or vault_root_token.stdout is not defined
+
+- name: Extract OTP and Nonce
+  set_fact:
+    vault_root_nonce: "{{ vault_root_init.stdout | regex_search('Nonce\\s+([a-f0-9-]+)', '\\1') | trim }}"
+    vault_root_otp: "{{ vault_root_init.stdout | regex_search('OTP\\s+([A-Za-z0-9]+)', '\\1') | trim }}"
+  when: vault_root_init.stdout is defined
+
+- name: Generate new root token
+  command: vault operator generate-root -address={{ vault_cluster_addr }} -otp={{ vault_root_otp }} -nonce={{ vault_root_nonce }}
+  register: vault_new_root_token
+  when: vault_root_nonce is defined and vault_root_otp is defined
+
+- name: Store new root token
+  copy:
+    dest: /root/.vault-root-token
+    content: "{{ vault_new_root_token.stdout | regex_search('Encoded Token: (.+)', '\\1') }}"
+    mode: '0600'

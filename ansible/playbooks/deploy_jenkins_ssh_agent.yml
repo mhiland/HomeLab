@@ -1,0 +1,47 @@
+---
+- name: Deploy Jenkins SSH Agent to Raspberry Pi hosts
+  hosts: raspberrypi
+  become: false
+  serial: "{{ serial_percentage | default('50%') }}"
+  timeout: 900  # 15 minutes per host
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  
+  pre_tasks:
+    - name: Validate environment variables
+      assert:
+        that:
+          - lookup('env', 'JENKINS_AGENT_SSH_PUBKEY') | length > 0
+        fail_msg: |
+          Required environment variable not set:
+          - JENKINS_AGENT_SSH_PUBKEY: Public SSH key from Jenkins controller
+      run_once: true
+      delegate_to: localhost
+
+    - name: Display deployment information
+      debug:
+        msg: |
+          Jenkins SSH Agent Deployment:
+          - Target hosts: {{ ansible_play_hosts | join(', ') }}
+          - Agent will listen on port 2222
+      run_once: true
+
+  roles:
+    - jenkins_agent_ssh
+
+  post_tasks:
+    - name: Gather deployment results
+      set_fact:
+        deployment_status: |
+          Host: {{ ansible_hostname }}
+          IP: {{ ansible_default_ipv4.address }}
+          SSH Port: 2222
+          Status: Success
+      
+    - name: Display deployment summary
+      debug:
+        msg: |
+          === Deployment Summary ===
+          {{ hostvars | dict2items | selectattr('value.deployment_status', 'defined') | map(attribute='value.deployment_status') | join('\n') }}
+      run_once: true
+      when: inventory_hostname == groups['raspberrypi'][-1]

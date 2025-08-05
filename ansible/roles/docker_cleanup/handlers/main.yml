@@ -1,0 +1,8 @@
+---
+# Handlers for docker_cleanup role
+
+- name: restart docker
+  systemd:
+    name: docker
+    state: restarted
+  when: ansible_service_mgr == "systemd"

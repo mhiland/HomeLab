@@ -1,0 +1,46 @@
+---
+# Wazuh Agent Role Metadata
+
+galaxy_info:
+  author: HomeLab Infrastructure Team
+  description: Deploys and configures Wazuh agents for security monitoring
+  company: HomeLab
+  license: MIT
+  min_ansible_version: 2.9
+  
+  platforms:
+    - name: Ubuntu
+      versions:
+        - 18.04
+        - 20.04
+        - 22.04
+    - name: Debian
+      versions:
+        - 10
+        - 11
+        - 12
+    - name: Fedora
+      versions:
+        - 35
+        - 36
+        - 37
+        - 38
+        - 39
+  
+  galaxy_tags:
+    - security
+    - monitoring
+    - wazuh
+    - siem
+    - intrusion-detection
+    - log-analysis
+    - compliance
+    - homelab
+    - raspberry-pi
+    - arm64
+
+dependencies: []
+
+collections:
+  - community.general
+  - ansible.posix

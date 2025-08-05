@@ -1,0 +1,24 @@
+services:
+  gitlab-runner:
+    image: {{ gitlab_runner_image }}
+    container_name: {{ gitlab_runner_container_name }}
+    restart: {{ gitlab_runner_restart_policy }}
+    user: "999:{{ docker_group_id }}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - {{ gitlab_runner_config_dir }}:/etc/gitlab-runner
+    environment:
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    command: ["run", "--config", "/etc/gitlab-runner/config.toml"]
+    deploy:
+      resources:
+        limits:
+          cpus: '{{ gitlab_runner_docker_cpus }}'
+          memory: {{ gitlab_runner_docker_memory }}
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+volumes:
+  gitlab-runner-config:
+    driver: local

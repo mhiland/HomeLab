@@ -1,0 +1,196 @@
+---
+# Monitoring Role Tasks
+- name: Include OS-specific variables
+  include_vars: "{{ ansible_os_family }}.yml"
+  ignore_errors: yes
+
+- name: Create monitoring users
+  user:
+    name: "{{ item }}"
+    system: yes
+    shell: /bin/false
+    home: /nonexistent
+    create_home: no
+  loop:
+    - "{{ node_exporter_user }}"
+    - "{{ process_exporter_user }}"
+  when: item != "root"
+
+- name: Create monitoring directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ node_exporter_user }}"
+    group: "{{ node_exporter_group }}"
+    mode: '0755'
+  loop:
+    - "{{ node_exporter_config_dir }}"
+    - "{{ node_exporter_log_dir }}"
+    - "{{ node_exporter_pid_dir }}"
+    - "{{ process_exporter_config_dir }}"
+
+- name: Check if node exporter is already installed
+  stat:
+    path: "{{ node_exporter_binary_install_dir }}/node_exporter"
+  register: node_exporter_binary
+
+- name: Download and install node exporter
+  when: not node_exporter_binary.stat.exists
+  block:
+    - name: Create temporary directory for download
+      tempfile:
+        state: directory
+        suffix: node_exporter
+      register: temp_dir
+
+    - name: Download node exporter archive
+      get_url:
+        url: "{{ node_exporter_download_url }}"
+        dest: "{{ temp_dir.path }}/node_exporter.tar.gz"
+        mode: '0644'
+      register: download_result
+      retries: 3
+      delay: 10
+
+    - name: Extract node exporter archive
+      unarchive:
+        src: "{{ temp_dir.path }}/node_exporter.tar.gz"
+        dest: "{{ temp_dir.path }}"
+        remote_src: yes
+        creates: "{{ temp_dir.path }}/node_exporter-{{ node_exporter_version }}.linux-arm64"
+
+    - name: Copy node exporter binary
+      copy:
+        src: "{{ temp_dir.path }}/node_exporter-{{ node_exporter_version }}.linux-arm64/node_exporter"
+        dest: "{{ node_exporter_binary_install_dir }}/node_exporter"
+        mode: '0755'
+        owner: root
+        group: root
+        remote_src: yes
+
+    - name: Remove temporary directory
+      file:
+        path: "{{ temp_dir.path }}"
+        state: absent
+
+- name: Install process exporter
+  when: process_exporter_enabled
+  block:
+    - name: Check if process exporter is already installed
+      stat:
+        path: "{{ process_exporter_binary_install_dir }}/process-exporter"
+      register: process_exporter_binary
+
+    - name: Download and install process exporter
+      when: not process_exporter_binary.stat.exists
+      block:
+        - name: Create temporary directory for process exporter download
+          tempfile:
+            state: directory
+            suffix: process_exporter
+          register: temp_dir_process
+
+        - name: Download process exporter archive
+          get_url:
+            url: "{{ process_exporter_download_url }}"
+            dest: "{{ temp_dir_process.path }}/process-exporter.tar.gz"
+            mode: '0644'
+          register: download_result_process
+          retries: 3
+          delay: 10
+
+        - name: Extract process exporter archive
+          unarchive:
+            src: "{{ temp_dir_process.path }}/process-exporter.tar.gz"
+            dest: "{{ temp_dir_process.path }}"
+            remote_src: yes
+            creates: "{{ temp_dir_process.path }}/process-exporter-{{ process_exporter_version }}.linux-arm64"
+
+        - name: Copy process exporter binary
+          copy:
+            src: "{{ temp_dir_process.path }}/process-exporter-{{ process_exporter_version }}.linux-arm64/process-exporter"
+            dest: "{{ process_exporter_binary_install_dir }}/process-exporter"
+            mode: '0755'
+            owner: root
+            group: root
+            remote_src: yes
+
+        - name: Remove temporary directory
+          file:
+            path: "{{ temp_dir_process.path }}"
+            state: absent
+
+    - name: Create process exporter configuration
+      copy:
+        content: "{{ process_exporter_config | to_nice_yaml }}"
+        dest: "{{ process_exporter_config_dir }}/config.yml"
+        owner: "{{ process_exporter_user }}"
+        group: "{{ process_exporter_group }}"
+        mode: '0644'
+      notify: restart process-exporter
+
+- name: Create systemd service files
+  template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - src: node_exporter.service.j2
+      dest: "{{ node_exporter_systemd_dir }}/node_exporter.service"
+    - src: process-exporter.service.j2
+      dest: "{{ node_exporter_systemd_dir }}/process-exporter.service"
+  notify:
+    - reload systemd
+    - restart node_exporter
+    - restart process-exporter
+  when: item.src == 'node_exporter.service.j2' or (item.src == 'process-exporter.service.j2' and process_exporter_enabled)
+
+- name: Configure firewall rules
+  include_tasks: firewall.yml
+  when: firewall_enabled
+
+- name: Start and enable node exporter service
+  systemd:
+    name: node_exporter
+    state: started
+    enabled: yes
+    daemon_reload: yes
+
+- name: Start and enable process exporter service
+  systemd:
+    name: process-exporter
+    state: started
+    enabled: yes
+    daemon_reload: yes
+  when: process_exporter_enabled
+
+- name: Verify node exporter is running
+  uri:
+    url: "http://localhost:{{ node_exporter_port }}/metrics"
+    method: GET
+    status_code: 200
+  register: node_exporter_health
+  retries: 5
+  delay: 10
+  until: node_exporter_health.status == 200
+
+- name: Verify process exporter is running
+  uri:
+    url: "http://localhost:{{ process_exporter_port }}/metrics"
+    method: GET
+    status_code: 200
+  register: process_exporter_health
+  retries: 5
+  delay: 10
+  until: process_exporter_health.status == 200
+  when: process_exporter_enabled
+
+- name: Display monitoring endpoints
+  debug:
+    msg: |
+      Node Exporter metrics available at: http://{{ ansible_default_ipv4.address }}:{{ node_exporter_port }}/metrics
+      {% if process_exporter_enabled %}
+      Process Exporter metrics available at: http://{{ ansible_default_ipv4.address }}:{{ process_exporter_port }}/metrics
+      {% endif %}

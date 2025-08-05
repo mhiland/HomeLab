@@ -1,0 +1,35 @@
+---
+# GitLab Runner Docker defaults
+gitlab_runner_container_name: gitlab-runner
+gitlab_runner_image: "{{ docker_registry_homelab_base_url }}/{{ gitlab_runner_image_name }}:latest"
+gitlab_runner_restart_policy: always
+
+# Runner configuration
+gitlab_runner_executor: docker
+gitlab_runner_docker_image: "{{ docker_registry_homelab_base_url }}/{{ gitlab_runner_image_name }}:latest"
+gitlab_runner_docker_privileged: true
+gitlab_runner_concurrent: 1  # Conservative for Raspberry Pi resources
+gitlab_runner_check_interval: 0
+
+# Tags for the runner
+gitlab_runner_tags: "raspberrypi,arm64,docker,instance"
+gitlab_runner_run_untagged: true
+gitlab_runner_locked: false
+
+# Docker volumes
+gitlab_runner_docker_volumes:
+  - "/var/run/docker.sock:/var/run/docker.sock"
+  - "/cache"
+
+# Resource limits for Raspberry Pi
+gitlab_runner_docker_memory: "1g"
+gitlab_runner_docker_memory_swap: "1g"
+gitlab_runner_docker_cpus: "1.0"
+
+# Paths
+gitlab_runner_config_dir: /srv/gitlab-runner/config
+gitlab_runner_docker_compose_dir: /srv/gitlab-runner
+
+# Service
+gitlab_runner_service_state: started
+gitlab_runner_service_enabled: true

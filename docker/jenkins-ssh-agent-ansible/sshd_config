@@ -1,0 +1,30 @@
+# SSH daemon configuration for Jenkins SSH agent
+# Based on jenkins/ssh-agent defaults with explicit algorithm support
+
+# Basic SSH settings
+Port 22
+Protocol 2
+PermitRootLogin no
+PasswordAuthentication no
+ChallengeResponseAuthentication no
+UsePAM no
+
+# Host keys
+HostKey /etc/ssh/ssh_host_rsa_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+HostKey /etc/ssh/ssh_host_ed25519_key
+
+# Explicitly define supported algorithms (excluding sk-* algorithms)
+HostKeyAlgorithms ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,rsa-sha2-512,rsa-sha2-256,ssh-rsa
+PubkeyAcceptedKeyTypes ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,rsa-sha2-512,rsa-sha2-256,ssh-rsa
+
+# Jenkins user settings
+AllowUsers jenkins
+AuthorizedKeysFile	/home/jenkins/.ssh/authorized_keys
+
+# Logging
+SyslogFacility AUTH
+LogLevel INFO
+
+# Subsystem
+Subsystem sftp /usr/lib/openssh/sftp-server

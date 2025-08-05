@@ -1,0 +1,40 @@
+---
+# Wazuh Agent Handlers
+
+- name: restart wazuh-agent
+  systemd:
+    name: wazuh-agent
+    state: restarted
+    daemon_reload: yes
+  listen: restart wazuh-agent
+
+- name: stop wazuh-agent
+  systemd:
+    name: wazuh-agent
+    state: stopped
+  listen: stop wazuh-agent
+
+- name: start wazuh-agent
+  systemd:
+    name: wazuh-agent
+    state: started
+    enabled: yes
+  listen: start wazuh-agent
+
+- name: reload wazuh-agent
+  systemd:
+    name: wazuh-agent
+    state: reloaded
+  listen: reload wazuh-agent
+
+- name: enable wazuh-agent
+  systemd:
+    name: wazuh-agent
+    enabled: yes
+  listen: enable wazuh-agent
+
+- name: disable wazuh-agent
+  systemd:
+    name: wazuh-agent
+    enabled: no
+  listen: disable wazuh-agent

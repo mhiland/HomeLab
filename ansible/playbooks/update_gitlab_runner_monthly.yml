@@ -1,0 +1,62 @@
+---
+- name: Build GitLab Runner image with Ansible support
+  import_playbook: build_gitlab_runner_image.yml
+
+- name: Deploy updated GitLab Runners to Raspberry Pi cluster
+  hosts: raspberrypi
+  become: yes
+  gather_facts: yes
+  serial: 1  # Deploy one Pi at a time to minimize service interruption
+
+  pre_tasks:
+    - name: Verify required environment variables
+      assert:
+        that:
+          - lookup('env', 'GITLAB_URL') != ''
+          - lookup('env', 'GITLAB_RUNNER_TOKEN') != ''
+        fail_msg: |
+          Required environment variables are not set.
+          Please export:
+            export GITLAB_URL="https://gitlab.example.com"
+            export GITLAB_RUNNER_TOKEN="your-token-here"
+
+    - name: Display update target
+      debug:
+        msg: "Updating GitLab Runner on {{ ansible_hostname }} with latest Ansible image"
+
+  tasks:
+    - name: Stop existing GitLab Runner container
+      shell: cd /srv/gitlab-runner && docker compose down
+      ignore_errors: true
+
+    - name: Pull latest image from registry
+      community.docker.docker_image:
+        name: "{{ docker_registry_homelab_base_url }}/{{ gitlab_runner_image_name }}:latest"
+        source: pull
+        state: present
+
+    - name: Start GitLab Runner with updated image
+      shell: cd /srv/gitlab-runner && docker compose up -d
+
+    - name: Wait for GitLab Runner to be ready
+      wait_for:
+        timeout: 30
+
+    - name: Verify runner is operational
+      shell: docker exec gitlab-runner gitlab-runner verify
+      register: runner_verify
+      changed_when: false
+      failed_when: false
+
+    - name: Display runner status
+      debug:
+        msg: "{{ ansible_hostname }} runner status: {{ 'HEALTHY' if runner_verify.rc == 0 else 'NEEDS ATTENTION' }}"
+
+  post_tasks:
+    - name: Summary of updated runners
+      debug:
+        msg: |
+          GitLab Runner update completed for {{ ansible_hostname }}
+          Container: gitlab-runner
+          Image: {{ docker_registry_homelab_base_url }}/{{ gitlab_runner_image_name }}:latest
+          Status: {{ 'HEALTHY' if runner_verify.rc == 0 else 'NEEDS ATTENTION' }}

@@ -1,0 +1,16 @@
+# Docker cleanup configuration
+docker_cleanup_enabled: true
+
+# Cleanup options
+docker_cleanup_images: true          # Remove dangling/orphaned images
+docker_cleanup_containers: true      # Remove stopped containers  
+docker_cleanup_volumes: false        # Remove unused volumes (disabled by default for safety)
+docker_cleanup_networks: true        # Remove unused networks
+docker_cleanup_build_cache: true     # Remove build cache
+
+# Safety settings
+docker_cleanup_force: false          # Never force removal of used resources
+docker_cleanup_all_images: false     # Only remove dangling images by default
+
+# Logging
+docker_cleanup_log_space: true       # Log disk space reclaimed

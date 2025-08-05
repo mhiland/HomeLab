@@ -1,0 +1,72 @@
+---
+- name: Build and publish GitLab Runner Ansible image
+  hosts: localhost
+  gather_facts: yes
+  vars:
+    image_name: gitlab-runner-ansible
+    image_tag: latest
+    registry_url: "{{ docker_registry_url }}"
+    dockerfile_path: "{{ playbook_dir }}/../../docker/gitlab-runner-ansible"
+    full_image_name: "{{ registry_url }}/homelab/{{ image_name }}:{{ image_tag }}"
+
+  tasks:
+    - name: Verify Docker is available
+      command: docker --version
+      register: docker_check
+      changed_when: false
+      failed_when: docker_check.rc != 0
+
+    - name: Display build information
+      debug:
+        msg: |
+          Building GitLab Runner image with Ansible support
+          Source: {{ dockerfile_path }}
+          Target: {{ full_image_name }}
+
+    - name: Check if Dockerfile exists
+      stat:
+        path: "{{ dockerfile_path }}/Dockerfile"
+      register: dockerfile_stat
+
+    - name: Fail if Dockerfile not found
+      fail:
+        msg: "Dockerfile not found at {{ dockerfile_path }}/Dockerfile"
+      when: not dockerfile_stat.stat.exists
+
+    - name: Build Docker image
+      community.docker.docker_image:
+        name: "homelab/{{ image_name }}"
+        tag: "{{ image_tag }}"
+        build:
+          path: "{{ dockerfile_path }}"
+          pull: true
+        source: build
+        state: present
+      register: build_result
+
+    - name: Tag image for registry
+      command: >
+        docker tag 
+        homelab/{{ image_name }}:{{ image_tag }}
+        {{ full_image_name }}
+      when: build_result.changed
+
+    - name: Push image to registry
+      community.docker.docker_image:
+        name: "{{ full_image_name }}"
+        push: true
+        source: local
+        state: present
+      register: push_result
+
+    - name: Display build summary
+      debug:
+        msg: |
+          Build completed successfully!
+          Image: {{ full_image_name }}
+          Built: {{ build_result.changed }}
+          Pushed: {{ push_result.changed }}
+          
+          Next steps:
+          1. Deploy updated runners: ansible-playbook -i inventories/homelab/hosts playbooks/deploy_gitlab_runner.yml
+          2. Or run full update: ansible-playbook playbooks/update_gitlab_runner_monthly.yml

@@ -1,0 +1,25 @@
+---
+# Jenkins SSH Agent defaults
+jenkins_ssh_agent_image: "{{ docker_registry_homelab_base_url }}/{{ jenkins_ssh_agent_image_name }}:latest"
+jenkins_ssh_agent_container_name: "jenkins-ssh-agent"
+jenkins_ssh_agent_data_dir: "/opt/jenkins-ssh-agent"
+jenkins_ssh_agent_ssh_port: 2222
+jenkins_ssh_agent_restart_policy: "unless-stopped"
+
+# Resource limits
+jenkins_ssh_agent_memory_limit: "1g"
+jenkins_ssh_agent_cpu_limit: "1.0"
+
+# Jenkins configuration
+jenkins_agent_ssh_pubkey: "{{ lookup('env', 'JENKINS_AGENT_SSH_PUBKEY') }}"
+jenkins_agent_name: "{{ ansible_hostname }}"
+jenkins_agent_workdir: "/home/jenkins/agent"
+
+# Agent labels
+jenkins_ssh_agent_labels: "ansible arm64 raspberrypi {{ ansible_hostname }}"
+
+# Health check settings
+jenkins_ssh_agent_health_check_enabled: true
+jenkins_ssh_agent_health_check_interval: "30s"
+jenkins_ssh_agent_health_check_timeout: "5s"
+jenkins_ssh_agent_health_check_retries: 3

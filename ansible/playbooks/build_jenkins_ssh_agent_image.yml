@@ -1,0 +1,71 @@
+---
+- name: Build and Push Jenkins SSH Agent Docker Image
+  hosts: localhost
+  gather_facts: no
+  vars:
+    registry_url: "{{ docker_registry_url }}"
+    image_name: "homelab/jenkins-ssh-agent-ansible"
+    image_tag: "latest"
+    dockerfile_path: "{{ playbook_dir }}/../../docker/jenkins-ssh-agent-ansible"
+    platforms:
+      - linux/arm64
+    
+  tasks:
+    - name: Check if Dockerfile exists
+      stat:
+        path: "{{ dockerfile_path }}/Dockerfile"
+      register: dockerfile_stat
+
+    - name: Fail if Dockerfile not found
+      fail:
+        msg: "Dockerfile not found at {{ dockerfile_path }}/Dockerfile"
+      when: not dockerfile_stat.stat.exists
+
+    - name: Build Docker image for ARM64
+      docker_image:
+        name: "{{ registry_url }}/{{ image_name }}"
+        tag: "{{ image_tag }}"
+        source: build
+        build:
+          path: "{{ dockerfile_path }}"
+          platform: "{{ platforms | join(',') }}"
+          pull: yes
+          nocache: "{{ force_rebuild | default(false) }}"
+        force_source: yes
+      register: build_result
+
+    - name: Display build result
+      debug:
+        msg: |
+          Image built successfully:
+          - Name: {{ registry_url }}/{{ image_name }}:{{ image_tag }}
+          - ID: {{ build_result.image.Id | default('N/A') }}
+          - Platform: {{ platforms | join(',') }}
+
+    - name: Push image to registry
+      docker_image:
+        name: "{{ registry_url }}/{{ image_name }}"
+        tag: "{{ image_tag }}"
+        push: yes
+        source: local
+      when: push_to_registry | default(true)
+      register: push_result
+
+    - name: Display push result
+      debug:
+        msg: "Image pushed successfully to {{ registry_url }}/{{ image_name }}:{{ image_tag }}"
+      when: push_result is not skipped
+
+    - name: Get image details
+      docker_image_info:
+        name: "{{ registry_url }}/{{ image_name }}:{{ image_tag }}"
+      register: image_info
+
+    - name: Display image information
+      debug:
+        msg: |
+          Image Details:
+          - Size: {{ (image_info.images[0].Size / 1024 / 1024) | round(2) }} MB
+          - Created: {{ image_info.images[0].Created }}
+          - Architecture: {{ image_info.images[0].Architecture | default('N/A') }}
+      when: image_info.images | length > 0

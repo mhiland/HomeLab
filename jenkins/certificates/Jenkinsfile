@@ -1,0 +1,34 @@
+pipeline {
+    agent any
+
+    environment {
+        CA_KEY = "${WORKSPACE}/internal-ca.key"
+        CA_CERT = "${WORKSPACE}/internal-ca.crt"
+    }
+
+    stages {
+        stage('Retrieve CA Certs') {
+            steps {
+                withCredentials([
+                    file(credentialsId: 'internal_ca_key', variable: 'CA_KEY'),
+                    file(credentialsId: 'internal_ca_cert', variable: 'CA_CERT')
+                ]) {
+                    sh 'cp $CA_KEY /tmp/internal-ca.key'
+                    sh 'cp $CA_CERT /tmp/internal-ca.crt'
+                }
+            }
+        }
+
+        stage('Run Ansible') {
+            steps {
+                sh 'ansible-playbook -i inventory.ini playbooks/generate_and_deploy_certs.yml --extra-vars "internal_ca_key=/tmp/internal-ca.key internal_ca_cert=/tmp/internal-ca.crt"'
+            }
+        }
+    }
+
+    post {
+        always {
+            sh 'rm -f /tmp/internal-ca.key /tmp/internal-ca.crt'
+        }
+    }
+}

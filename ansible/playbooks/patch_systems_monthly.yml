@@ -1,0 +1,159 @@
+---
+# Monthly Full Upgrade Playbook
+# Performs full system upgrades on all configured hosts
+# Designed for Jenkins Ansible Plugin execution
+
+- hosts: all
+  become: yes
+  serial: "{{ serial_percentage | default(100) }}%"
+  gather_facts: yes
+  vars:
+    patching_type: monthly
+    # Jenkins plugin automatically provides environment variables
+    jenkins_mode: "{{ lookup('env', 'JENKINS_URL') != '' }}"
+    log_directory: "{{ lookup('env', 'WORKSPACE') | default('./logs') }}/ansible_logs"
+    job_name: "{{ lookup('env', 'JOB_NAME') | default('manual_execution') }}"
+    build_number: "{{ lookup('env', 'BUILD_NUMBER') | default('0') }}"
+    
+  pre_tasks:
+    - name: Display execution information
+      debug:
+        msg: |
+          === Monthly Full Upgrade Execution ===
+          Host: {{ inventory_hostname }}
+          Jenkins Mode: {{ jenkins_mode }}
+          Job: {{ job_name }} #{{ build_number }}
+          Log Directory: {{ log_directory }}
+          Total Hosts: {{ ansible_play_hosts | length }}
+          Serial Execution: {{ serial_percentage | default(100) }}%
+          Timestamp: {{ ansible_date_time.iso8601 }}
+          
+    - name: Validate SSH connectivity
+      ping:
+      
+    # Python Version Enforcement - Collect issues, fail at end
+    - name: Check managed Python installation
+      stat:
+        path: /opt/python3.11/bin/python3
+      register: managed_python_exists
+      
+    - name: Get managed Python version
+      command: /opt/python3.11/bin/python3 --version
+      register: managed_python_version
+      changed_when: false
+      failed_when: false
+      when: managed_python_exists.stat.exists
+      
+    - name: Record Python compliance status
+      set_fact:
+        python_compliance_issues: >-
+          {{
+            ([] if managed_python_exists.stat.exists else ['Missing managed Python at /opt/python3.11/bin/python3']) +
+            ([] if managed_python_exists.stat.exists and managed_python_version.stdout is defined and 'Python 3.' in managed_python_version.stdout 
+             else ['Invalid Python version: Expected Python 3.x, found ' + (managed_python_version.stdout | default('unknown'))])
+          }}
+      
+    - name: Display Python compliance status
+      debug:
+        msg: |
+          Python compliance check - {{ inventory_hostname }}:
+          {% if python_compliance_issues | length == 0 %}
+          ✓ COMPLIANT - Managed Python: {{ managed_python_version.stdout }}
+          {% else %}
+          ✗ NON-COMPLIANT - Issues found:
+          {% for issue in python_compliance_issues %}
+          - {{ issue }}
+          {% endfor %}
+          {% endif %}
+          Interpreter: {{ ansible_python_interpreter }}
+      
+    - name: Backup and remove conflicting legacy Docker repository file
+      shell: |
+        if [ -f /etc/apt/sources.list.d/download_docker_com_linux_debian.list ]; then
+          mv /etc/apt/sources.list.d/download_docker_com_linux_debian.list /etc/apt/sources.list.d/download_docker_com_linux_debian.list.disabled
+          echo "Disabled conflicting Docker repository file"
+        else
+          echo "No conflicting Docker repository file found"
+        fi
+        # Also clean up any existing invalid backup files
+        find /etc/apt/sources.list.d/ -name "*.backup.*" -delete 2>/dev/null || true
+      when: ansible_facts['os_family'] == 'Debian'
+      ignore_errors: yes
+      register: docker_cleanup
+      changed_when: "'Disabled conflicting' in docker_cleanup.stdout"
+      
+    - name: Create log directory
+      file:
+        path: "{{ log_directory }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      run_once: true
+      when: jenkins_mode
+      become: no
+      
+  roles:
+    - os_patch
+    
+  post_tasks:
+    # Python Version Enforcement - HARD FAILURE after all hosts processed
+    - name: Fail if Python compliance issues detected
+      fail:
+        msg: |
+          CRITICAL: Python compliance failures detected on {{ inventory_hostname }}
+          
+          Issues found:
+          {% for issue in python_compliance_issues %}
+          - {{ issue }}
+          {% endfor %}
+          
+          Actions required:
+          1. Run deploy_python_management.yml playbook to install/fix Python
+          2. Verify Python installation: /opt/python3.11/bin/python3 --version
+          3. Re-run monthly patching job after compliance is restored
+          
+          This host has completed patching but system state may be inconsistent.
+      when: python_compliance_issues is defined and python_compliance_issues | length > 0
+      
+    - name: Generate Jenkins artifact summary
+      copy:
+        content: |
+          # Monthly Full Upgrade Summary
+          
+          **Job:** {{ job_name }} #{{ build_number }}  
+          **Started:** {{ ansible_date_time.iso8601 }}  
+          **Host:** {{ inventory_hostname }}  
+          **User:** {{ ansible_user_id }}  
+          
+          ## System Information
+          - **OS:** {{ ansible_distribution }} {{ ansible_distribution_version }}
+          - **Kernel:** {{ ansible_kernel }}
+          - **Architecture:** {{ ansible_architecture }}
+          
+          ## Upgrade Results
+          {% if patch_result is defined %}
+          - **Status:** {{ 'SUCCESS' if patch_result is succeeded else 'FAILED' }}
+          - **Changed:** {{ patch_result.changed | default(false) }}
+          {% if patch_result.stdout_lines is defined %}
+          - **Packages:** {{ patch_result.stdout_lines | length }} operations
+          {% endif %}
+          {% else %}
+          - **Status:** No patch result available
+          {% endif %}
+          
+        dest: "{{ log_directory }}/{{ inventory_hostname }}_monthly_{{ build_number }}.md"
+      delegate_to: localhost
+      when: jenkins_mode
+      become: no
+      
+    - name: Display completion status
+      debug:
+        msg: |
+          === Monthly Full Upgrade Complete ===
+          Host: {{ inventory_hostname }}
+          Status: {{ 'SUCCESS' if patch_result is succeeded else 'FAILED' }}
+          {% if patch_result.changed %}
+          System was upgraded
+          {% else %}
+          No upgrades were needed
+          {% endif %}

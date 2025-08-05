@@ -1,0 +1,29 @@
+- name: Check if generate-root is in progress
+  command: vault operator generate-root -status -address={{ vault_cluster_addr }}
+  register: vault_root_status
+  ignore_errors: yes
+
+- name: Cancel ongoing generate-root operation if active
+  command: vault operator generate-root -cancel -address={{ vault_cluster_addr }}
+  when: '"Started       true" in vault_root_status.stdout'
+
+- name: Initiate generate-root for rotation
+  command: vault operator generate-root -init -address={{ vault_cluster_addr }}
+  register: vault_root_init
+
+- name: Extract OTP and Nonce for rotation
+  set_fact:
+    vault_root_nonce: "{{ vault_root_init.stdout | regex_search('Nonce\\s+([a-f0-9-]+)', '\\1') | trim }}"
+    vault_root_otp: "{{ vault_root_init.stdout | regex_search('OTP\\s+([A-Za-z0-9]+)', '\\1') | trim }}"
+  when: vault_root_init.stdout is defined
+
+- name: Generate rotated root token
+  command: vault operator generate-root -address={{ vault_cluster_addr }} -otp={{ vault_root_otp }} -nonce={{ vault_root_nonce }}
+  register: vault_rotated_token
+  when: vault_root_nonce is defined and vault_root_otp is defined
+
+- name: Save rotated root token
+  copy:
+    dest: /root/.vault-root-token
+    content: "{{ vault_rotated_token.stdout | regex_search('Encoded Token: (.+)', '\\1') }}"
+    mode: '0600'

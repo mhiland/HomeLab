@@ -1,0 +1,188 @@
+---
+- name: Register Jenkins SSH Nodes
+  hosts: raspberrypi
+  gather_facts: yes
+  serial: 1  # Register one at a time to avoid conflicts
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    jenkins_url: "{{ lookup('env', 'JENKINS_URL') }}"
+    jenkins_user: "{{ lookup('env', 'JENKINS_USER') | default('admin') }}"
+    jenkins_token: "{{ lookup('env', 'JENKINS_TOKEN') }}"
+    jenkins_ssh_port: 2222
+    jenkins_remote_fs: "/home/jenkins/agent"
+    jenkins_num_executors: 1
+    jenkins_node_mode: "NORMAL"
+    jenkins_labels: "ansible"
+    jenkins_credentials_id: "jenkins_ssh_key"
+    registration_action: "{{ node_action | default('create') }}"  # create or remove
+
+  pre_tasks:
+    - name: Validate required environment variables
+      assert:
+        that:
+          - jenkins_url | length > 0
+          - jenkins_user | length > 0
+          - jenkins_token | length > 0
+        fail_msg: |
+          Required environment variables not set:
+          - JENKINS_URL: URL of Jenkins controller
+          - JENKINS_USER: Jenkins username
+          - JENKINS_TOKEN: Jenkins API token
+      run_once: true
+      delegate_to: localhost
+
+    - name: Display action information
+      debug:
+        msg: |
+          Jenkins Node Registration:
+          - Action: {{ registration_action }}
+          - Jenkins URL: {{ jenkins_url }}
+          - Target hosts: {{ ansible_play_hosts | join(', ') }}
+      run_once: true
+
+  tasks:
+    - name: Get Jenkins crumb for CSRF protection
+      uri:
+        url: "{{ jenkins_url }}/crumbIssuer/api/json"
+        user: "{{ jenkins_user }}"
+        password: "{{ jenkins_token }}"
+        force_basic_auth: yes
+        method: GET
+        status_code: [200, 403, 404]  # Handle cases where crumb is disabled
+      register: crumb_response
+      delegate_to: localhost
+      run_once: true
+      failed_when: false
+
+    - name: Check if node already exists using curl
+      shell: |
+        curl -u "{{ jenkins_user }}:{{ jenkins_token }}" "{{ jenkins_url }}/computer/{{ ansible_hostname }}/api/json" \
+          -w "%{http_code}" -o /dev/null -s
+      register: node_check
+      delegate_to: localhost
+      failed_when: false
+
+    - name: Set node exists fact
+      set_fact:
+        node_exists: "{{ node_check.stdout == '200' }}"
+
+    - name: Create Jenkins node using curl (workaround for CSRF issues)
+      shell: |
+        curl -u "{{ jenkins_user }}:{{ jenkins_token }}" -X POST "{{ jenkins_url }}/computer/doCreateItem" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          --data-urlencode "name={{ ansible_hostname }}" \
+          --data-urlencode "type=hudson.slaves.DumbSlave" \
+          --data-urlencode 'json={
+            "name": "{{ ansible_hostname }}",
+            "nodeDescription": "Raspberry Pi SSH agent - {{ ansible_hostname }}",
+            "numExecutors": "{{ jenkins_num_executors }}",
+            "remoteFS": "{{ jenkins_remote_fs }}",
+            "labelString": "{{ jenkins_labels }}",
+            "mode": "{{ jenkins_node_mode }}",
+            "": ["", "0"],
+            "launcher": {
+              "stapler-class": "hudson.plugins.sshslaves.SSHLauncher",
+              "$class": "hudson.plugins.sshslaves.SSHLauncher",
+              "host": "{{ ansible_hostname }}",
+              "port": "{{ jenkins_ssh_port }}",
+              "credentialsId": "{{ jenkins_credentials_id }}",
+              "launchTimeoutSeconds": "60",
+              "maxNumRetries": "10",
+              "retryWaitTime": "15",
+              "sshHostKeyVerificationStrategy": {
+                "stapler-class": "hudson.plugins.sshslaves.verifiers.NonVerifyingKeyVerificationStrategy",
+                "$class": "hudson.plugins.sshslaves.verifiers.NonVerifyingKeyVerificationStrategy"
+              },
+              "javaPath": "/opt/java/openjdk/bin/java"
+            },
+            "retentionStrategy": {
+              "stapler-class": "hudson.slaves.RetentionStrategy$Always",
+              "$class": "hudson.slaves.RetentionStrategy$Always"
+            },
+            "nodeProperties": {
+              "stapler-class-bag": "true"
+            }
+          }' \
+          -w "%{http_code}" -o /dev/null -s
+      when:
+        - registration_action == "create"
+        - not node_exists
+      delegate_to: localhost
+      register: create_result
+      changed_when: create_result.stdout == "302"
+      failed_when: create_result.stdout not in ["200", "302", "400"]
+
+    - name: Remove Jenkins node
+      uri:
+        url: "{{ jenkins_url }}/computer/{{ ansible_hostname }}/doDelete"
+        user: "{{ jenkins_user }}"
+        password: "{{ jenkins_token }}"
+        force_basic_auth: yes
+        method: POST
+        headers:
+          "{{ crumb_response.json.crumbRequestField | default('') }}": "{{ crumb_response.json.crumb | default('') }}"
+        status_code: [200, 302, 404]  # 404 if node doesn't exist
+      when:
+        - registration_action == "remove"
+        - node_exists
+      delegate_to: localhost
+      register: remove_result
+
+    - name: Wait for node to come online (if created)
+      shell: |
+        curl -u "{{ jenkins_user }}:{{ jenkins_token }}" "{{ jenkins_url }}/computer/{{ ansible_hostname }}/api/json" -s | \
+        python3 -c "import sys, json; data=json.load(sys.stdin); print('false' if data.get('offline', True) else 'true')"
+      register: node_online_check
+      until: node_online_check.stdout == "true"
+      retries: 12
+      delay: 5
+      when:
+        - registration_action == "create"
+        - create_result is not skipped
+        - create_result.stdout == "302"
+      delegate_to: localhost
+      ignore_errors: yes
+
+    - name: Report node status
+      debug:
+        msg: |
+          Node: {{ ansible_hostname }}
+          Action: {{ registration_action }}
+          Status: {% if registration_action == "create" %}
+            {%- if not node_exists and create_result is not skipped -%}
+              Created successfully
+            {%- elif node_exists -%}
+              Already exists
+            {%- else -%}
+              Failed to create
+            {%- endif -%}
+          {% else %}
+            {%- if node_exists and remove_result is not skipped -%}
+              Removed successfully
+            {%- elif not node_exists -%}
+              Does not exist
+            {%- else -%}
+              Failed to remove
+            {%- endif -%}
+          {% endif %}
+          {% if action == "create" and node_online_check is not skipped -%}
+          Online: {{ node_online_check.stdout == "true" }}
+          {%- endif %}
+
+  post_tasks:
+    - name: Display summary
+      debug:
+        msg: |
+          === Jenkins Node Registration Summary ===
+          Total hosts processed: {{ ansible_play_hosts | length }}
+          Action performed: {{ registration_action }}
+          Jenkins URL: {{ jenkins_url }}
+
+          {% if registration_action == "create" %}
+          Next steps:
+          1. Verify nodes at: {{ jenkins_url }}/computer/
+          2. Check node logs if any are offline
+          3. Run test jobs using labels: raspberrypi, arm64, ansible
+          {% endif %}
+      run_once: true
+      when: inventory_hostname == ansible_play_hosts[-1]

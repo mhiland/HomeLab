@@ -1,0 +1,49 @@
+# Monitoring Role Defaults
+---
+# Node Exporter Configuration
+node_exporter_version: "1.7.0"
+node_exporter_port: 9100
+node_exporter_user: "node_exporter"
+node_exporter_group: "node_exporter"
+node_exporter_binary_install_dir: "/usr/local/bin"
+node_exporter_config_dir: "/etc/node_exporter"
+node_exporter_log_dir: "/var/log/node_exporter"
+node_exporter_pid_dir: "/run/node_exporter"
+
+# Process Exporter Configuration (optional)
+process_exporter_enabled: false
+process_exporter_version: "0.7.10"
+process_exporter_port: 9256
+process_exporter_user: "process_exporter"
+process_exporter_group: "process_exporter"
+process_exporter_binary_install_dir: "/usr/local/bin"
+process_exporter_config_dir: "/etc/process_exporter"
+
+# Download URLs (ARM64 for Raspberry Pi)
+node_exporter_download_url: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-arm64.tar.gz"
+process_exporter_download_url: "https://github.com/ncabatoff/process-exporter/releases/download/v{{ process_exporter_version }}/process-exporter-{{ process_exporter_version }}.linux-arm64.tar.gz"
+
+# Systemd Configuration
+node_exporter_systemd_dir: "/etc/systemd/system"
+restart_policy: "on-failure"
+restart_delay: "5s"
+
+# Firewall Configuration
+firewall_enabled: true
+allowed_ips: []  # Empty means allow from all IPs - configure as needed
+
+# Service Configuration
+node_exporter_args: 
+  - "--web.listen-address=:{{ node_exporter_port }}"
+  - "--path.rootfs=/host"
+  - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+
+# Process monitoring configuration (when enabled)
+process_exporter_config:
+  process_names:
+    - name: "vault"
+      cmdline: ["vault"]
+    - name: "ssh"  
+      cmdline: ["sshd"]
+    - name: "systemd"
+      cmdline: ["systemd"]

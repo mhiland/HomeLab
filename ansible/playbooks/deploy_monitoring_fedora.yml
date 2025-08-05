@@ -1,0 +1,129 @@
+---
+# Monitoring Deployment Playbook for Fedora Server
+# Deploys Node Exporter and optionally Process Exporter to Fedora hosts
+# for integration with hosted Prometheus/Grafana at northwardlabs.ca
+
+- hosts: fedora
+  become: yes
+  gather_facts: yes
+  serial: "{{ serial_percentage | default(50) }}%"
+  
+  vars:
+    # Default monitoring configuration
+    monitoring_enabled: true
+    node_exporter_enabled: true
+    process_exporter_enabled: false  # Enable if you want process monitoring
+    
+    # Override for x86_64 architecture
+    node_exporter_download_url: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+    process_exporter_download_url: "https://github.com/ncabatoff/process-exporter/releases/download/v{{ process_exporter_version }}/process-exporter-{{ process_exporter_version }}.linux-amd64.tar.gz"
+    
+    # Jenkins integration (auto-detected)
+    jenkins_mode: "{{ lookup('env', 'JENKINS_URL') != '' }}"
+    log_directory: "{{ lookup('env', 'WORKSPACE') | default('./logs') }}/monitoring_logs"
+    job_name: "{{ lookup('env', 'JOB_NAME') | default('manual_execution') }}"
+    build_number: "{{ lookup('env', 'BUILD_NUMBER') | default('0') }}"
+
+  pre_tasks:
+    - name: Display deployment information
+      debug:
+        msg: |
+          === Monitoring Deployment (Fedora) ===
+          Host: {{ inventory_hostname }}
+          Target: {{ ansible_default_ipv4.address }}
+          Architecture: {{ ansible_architecture }}
+          OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          Jenkins Mode: {{ jenkins_mode }}
+          Job: {{ job_name }} #{{ build_number }}
+          Node Exporter: {{ node_exporter_enabled }}
+          Process Exporter: {{ process_exporter_enabled }}
+          Timestamp: {{ ansible_date_time.iso8601 }}
+          
+    - name: Validate SSH connectivity
+      ping:
+        
+    - name: Check system architecture compatibility
+      debug:
+        msg: "Deploying x86_64 binaries for {{ ansible_architecture }} architecture"
+      when: ansible_architecture in ['x86_64', 'amd64']
+      
+    - name: Warn about architecture mismatch
+      debug:
+        msg: "WARNING: Expected x86_64 architecture, but found {{ ansible_architecture }}. Proceeding anyway."
+      when: ansible_architecture not in ['x86_64', 'amd64']
+      
+    - name: Create log directory
+      file:
+        path: "{{ log_directory }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      run_once: true
+      when: jenkins_mode
+
+  roles:
+    - role: monitoring
+      when: monitoring_enabled
+
+  post_tasks:
+    - name: Verify monitoring endpoints
+      uri:
+        url: "http://{{ ansible_default_ipv4.address }}:{{ node_exporter_port }}/metrics"
+        method: GET
+        status_code: 200
+        timeout: 10
+      register: endpoint_check
+      retries: 3
+      delay: 5
+      
+    - name: Generate Jenkins deployment summary
+      copy:
+        content: |
+          # Monitoring Deployment Summary (Fedora)
+          
+          **Job:** {{ job_name }} #{{ build_number }}  
+          **Started:** {{ ansible_date_time.iso8601 }}  
+          **Host:** {{ inventory_hostname }} ({{ ansible_default_ipv4.address }})  
+          **User:** {{ ansible_user_id }}  
+          
+          ## System Information
+          - **OS:** {{ ansible_distribution }} {{ ansible_distribution_version }}
+          - **Kernel:** {{ ansible_kernel }}
+          - **Architecture:** {{ ansible_architecture }}
+          - **Memory:** {{ ansible_memtotal_mb }}MB
+          
+          ## Monitoring Services
+          - **Node Exporter:** {{ 'RUNNING' if endpoint_check is succeeded else 'FAILED' }}
+            - Port: {{ node_exporter_port }}
+            - Endpoint: http://{{ ansible_default_ipv4.address }}:{{ node_exporter_port }}/metrics
+          {% if process_exporter_enabled %}
+          - **Process Exporter:** Enabled on port {{ process_exporter_port }}
+            - Endpoint: http://{{ ansible_default_ipv4.address }}:{{ process_exporter_port }}/metrics
+          {% endif %}
+          
+          ## Next Steps
+          Add the following to your Prometheus configuration at https://prometheus.example.com/:
+          
+          ```yaml
+          scrape_configs:
+            - job_name: 'homelab-{{ inventory_hostname }}'
+              static_configs:
+                - targets: ['{{ ansible_default_ipv4.address }}:{{ node_exporter_port }}']
+              scrape_interval: 15s
+              metrics_path: /metrics
+          ```
+          
+        dest: "{{ log_directory }}/{{ inventory_hostname }}_monitoring_{{ build_number }}.md"
+      delegate_to: localhost
+      when: jenkins_mode
+      
+    - name: Display completion status
+      debug:
+        msg: |
+          === Monitoring Deployment Complete (Fedora) ===
+          Host: {{ inventory_hostname }}
+          Node Exporter: {{ 'SUCCESS' if endpoint_check is succeeded else 'FAILED' }}
+          Metrics URL: http://{{ ansible_default_ipv4.address }}:{{ node_exporter_port }}/metrics
+          
+          Add this target to your Prometheus config:
+          - targets: ['{{ ansible_default_ipv4.address }}:{{ node_exporter_port }}']

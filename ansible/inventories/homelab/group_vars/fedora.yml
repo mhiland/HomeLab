@@ -1,0 +1,9 @@
+# Fedora-specific configuration
+ansible_python_interpreter: /usr/bin/python3
+
+# Architecture-specific binary URLs for monitoring
+node_exporter_download_url: "https://github.com/prometheus/node_exporter/releases/download/v{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz"
+process_exporter_download_url: "https://github.com/ncabatoff/process-exporter/releases/download/v{{ process_exporter_version }}/process-exporter-{{ process_exporter_version }}.linux-amd64.tar.gz"
+
+# Docker configuration for Fedora (x86_64)
+docker_compose_architecture: x86_64

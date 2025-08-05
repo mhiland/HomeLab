@@ -1,0 +1,17 @@
+# SSL Certificate Configuration
+certs_dir: "/etc/ssl/certs"
+internal_ca_key: "{{ lookup('env', 'INTERNAL_CA_KEY') | default('/path/to/internal-ca.key') }}"
+internal_ca_cert: "{{ lookup('env', 'INTERNAL_CA_CERT') | default('/path/to/internal-ca.crt') }}"
+cert_days: 1095
+
+# Python Configuration
+ansible_python_interpreter: /opt/python3.11/bin/python3
+
+# Container Registry Configuration
+docker_registry_url: "registry.example.com"
+docker_registry_homelab_namespace: "homelab"
+docker_registry_homelab_base_url: "{{ docker_registry_url }}/{{ docker_registry_homelab_namespace }}"
+
+# Container Image Names
+jenkins_ssh_agent_image_name: "jenkins-ssh-agent-ansible"
+gitlab_runner_image_name: "gitlab-runner-ansible"

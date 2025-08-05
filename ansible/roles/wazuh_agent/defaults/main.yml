@@ -1,0 +1,68 @@
+# Wazuh Agent Role Defaults
+---
+# Wazuh Server Configuration
+wazuh_server_url: "wazuh.example.com"
+wazuh_server_port: 1514
+wazuh_server_protocol: "tcp"
+wazuh_registration_server: "wazuh.example.com"
+wazuh_registration_port: 1515
+
+# SSL Configuration (disabled per requirements)
+wazuh_ssl_verify: false
+wazuh_server_ssl_port: 9200
+
+# Agent Configuration
+wazuh_agent_name: "{{ inventory_hostname }}-homelab"
+wazuh_agent_groups: "raspberry-pi,homelab"
+wazuh_agent_config_profile: "generic"
+
+# Installation Configuration
+wazuh_version: "4.7.0"
+wazuh_repository_key: "https://packages.wazuh.com/key/GPG-KEY-WAZUH"
+wazuh_repository: "deb https://packages.wazuh.com/4.x/apt/ stable main"
+wazuh_package_name: "wazuh-agent"
+
+# Service Configuration
+wazuh_service_name: "wazuh-agent"
+wazuh_service_enabled: true
+wazuh_service_state: "started"
+
+# Directories and Files
+wazuh_dir: "/var/ossec"
+wazuh_config_file: "{{ wazuh_dir }}/etc/ossec.conf"
+wazuh_log_dir: "{{ wazuh_dir }}/logs"
+wazuh_bin_dir: "{{ wazuh_dir }}/bin"
+wazuh_agent_auth_script: "{{ wazuh_bin_dir }}/agent-auth"
+
+# Logging Configuration
+wazuh_log_level: "info"
+wazuh_log_format: "plain"
+
+# Monitoring Configuration
+wazuh_rootcheck_enabled: true
+wazuh_syscheck_enabled: true
+wazuh_openscap_enabled: false
+wazuh_cis_cat_enabled: false
+wazuh_osquery_enabled: false
+wazuh_inventory_enabled: true
+wazuh_active_response_enabled: false
+
+# System Integration
+wazuh_syslog_enabled: true
+wazuh_auth_enabled: true
+wazuh_remote_commands: false
+
+# Firewall Configuration
+wazuh_firewall_enabled: true
+wazuh_firewall_ports:
+  - "{{ wazuh_server_port }}/tcp"
+  - "{{ wazuh_registration_port }}/tcp"
+
+# Performance Settings
+wazuh_max_agents: 100
+wazuh_connection_retry_interval: 300
+wazuh_notify_time: 60
+wazuh_time_reconnect: 60
+
+# Architecture-specific settings
+wazuh_arch: "{{ 'amd64' if ansible_architecture == 'x86_64' else 'arm64' if ansible_architecture in ['aarch64', 'arm64'] else 'armhf' }}"

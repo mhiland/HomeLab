@@ -1,0 +1,88 @@
+---
+- name: Install required system packages
+  dnf:
+    name:
+      - dnf-plugins-core
+      - curl
+      - ca-certificates
+      - python3-pip
+    state: present
+    update_cache: yes
+  become: yes
+
+- name: Add Docker repository
+  get_url:
+    url: https://download.docker.com/linux/fedora/docker-ce.repo
+    dest: /etc/yum.repos.d/docker-ce.repo
+    mode: '0644'
+  become: yes
+
+- name: Install Docker CE
+  dnf:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+    state: "{{ docker_package_state }}"
+    update_cache: yes
+  become: yes
+  notify: restart docker
+
+- name: Install Docker SDK for Python (via pip)
+  pip:
+    name:
+      - docker
+      - docker-compose
+    state: present
+  become: yes
+
+- name: Ensure Docker daemon directory exists
+  file:
+    path: /etc/docker
+    state: directory
+    mode: '0755'
+  become: yes
+
+- name: Configure Docker daemon
+  copy:
+    content: "{{ docker_daemon_options | to_nice_json }}"
+    dest: /etc/docker/daemon.json
+    mode: '0644'
+  become: yes
+  notify: restart docker
+
+- name: Ensure Docker is started and enabled
+  service:
+    name: docker
+    state: "{{ docker_service_state }}"
+    enabled: "{{ docker_service_enabled }}"
+  become: yes
+
+- name: Add users to docker group
+  user:
+    name: "{{ item }}"
+    groups: docker
+    append: yes
+  with_items: "{{ docker_users }}"
+  become: yes
+
+- name: Install Docker Compose standalone (optional)
+  get_url:
+    url: "https://github.com/docker/compose/releases/download/v{{ docker_compose_version }}/docker-compose-linux-{{ docker_compose_architecture | default('x86_64') }}"
+    dest: "{{ docker_compose_path }}"
+    mode: '0755'
+  become: yes
+  when: docker_install_compose
+
+- name: Verify Docker installation
+  command: docker version
+  register: docker_version
+  changed_when: false
+  failed_when: false
+
+- name: Display Docker version
+  debug:
+    msg: "Docker installed successfully: {{ docker_version.stdout_lines[0] | default('Version info not available') }}"
+  when: docker_version.rc == 0

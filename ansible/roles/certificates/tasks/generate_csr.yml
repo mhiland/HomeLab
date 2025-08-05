@@ -1,0 +1,59 @@
+- name: Ensure certs directory exists on target
+  file:
+    path: "{{ certs_dir }}"
+    state: directory
+    mode: '0755'
+  become: yes
+
+- name: Get the IP from inventory
+  set_fact:
+    vault_ip: "{{ ansible_host }}"
+
+- name: Create OpenSSL configuration file for CSR
+  template:
+    src: "openssl.cnf.j2"
+    dest: "{{ certs_dir }}/openssl.cnf"
+  become: yes
+
+- name: Fetch OpenSSL configuration file to control node
+  fetch:
+    src: "{{ certs_dir }}/openssl.cnf"
+    dest: "{{ playbook_dir }}/certs/openssl_{{ inventory_hostname }}.cnf"
+    flat: yes
+
+- name: Generate CSR on target
+  command: >
+    openssl req -new -newkey rsa:4096 -nodes
+    -keyout "{{ certs_dir }}/{{ inventory_hostname }}.key"
+    -out "{{ certs_dir }}/{{ inventory_hostname }}.csr"
+    -config "{{ certs_dir }}/openssl.cnf"
+    -subj "/CN={{ inventory_hostname }}.homelab"
+  args:
+    creates: "{{ certs_dir }}/{{ inventory_hostname }}.csr"
+  become: yes
+
+- name: Copy CSR to /tmp/ for fetching
+  command: cp "{{ certs_dir }}/{{ inventory_hostname }}.csr" "/tmp/{{ inventory_hostname }}.csr"
+  args:
+    creates: "/tmp/{{ inventory_hostname }}.csr"
+  become: yes
+
+- name: Change permissions for the copied CSR
+  file:
+    path: "/tmp/{{ inventory_hostname }}.csr"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0644'
+  become: yes
+
+- name: Fetch CSR to control node
+  fetch:
+    src: "/tmp/{{ inventory_hostname }}.csr"
+    dest: "{{ playbook_dir }}/certs/"
+    flat: yes
+
+- name: Remove temporary CSR file
+  file:
+    path: "/tmp/{{ inventory_hostname }}.csr"
+    state: absent
+  become: yes

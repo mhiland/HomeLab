@@ -1,0 +1,26 @@
+# Patching configuration
+patching_type: nightly
+
+# Retry and timeout configuration
+max_retries: 2
+retry_delay_base: 10
+operation_timeout: 1800  # 30 minutes
+
+# Jenkins integration (auto-detected)
+jenkins_log_format: "{{ (lookup('env', 'JENKINS_URL') != '') | bool }}"
+log_directory: "./logs"
+
+# Unattended upgrade configuration for Debian
+debian_frontend: noninteractive
+debian_priority: critical
+apt_listchanges_frontend: none
+
+# APT configuration options
+apt_force_confdef: true
+apt_force_confold: true
+apt_assume_yes: true
+apt_fix_broken: true
+
+# Parallel execution
+parallel_execution: true
+serial_percentage: 100  # Run on all hosts simultaneously by default

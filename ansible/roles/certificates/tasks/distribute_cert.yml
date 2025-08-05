@@ -1,0 +1,13 @@
+- name: Copy signed certificate to remote tmp directory
+  vars:
+    remote_host: "{{ hostvars[inventory_hostname].inventory_hostname }}"
+  copy:
+    src: "{{ playbook_dir }}/certs/{{ remote_host }}.crt"
+    dest: "/tmp/{{ remote_host }}.crt"
+    mode: '0644'
+
+- name: Move certificate to final location with root permissions
+  vars:
+    remote_host: "{{ hostvars[inventory_hostname].inventory_hostname }}"
+  command: mv /tmp/{{ remote_host }}.crt /etc/ssl/certs/{{ remote_host }}.crt
+  become: true

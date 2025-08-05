@@ -1,0 +1,13 @@
+---
+# Python Management Role Defaults - Symlink Strategy
+
+# Target Python version (for enforcement, not installation)
+python_major_minor: "3.11"
+
+# Standardized paths for managed Python
+python_install_prefix: "/opt/python{{ python_major_minor }}"
+python_executable: "{{ python_install_prefix }}/bin/python3"
+pip_executable: "{{ python_install_prefix }}/bin/pip3"
+
+# Strategy: Create symlinks to system Python at standardized location
+# This avoids compilation time while providing path consistency

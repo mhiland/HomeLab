@@ -1,0 +1,316 @@
+pipeline {
+    agent any
+    
+    parameters {
+        choice(
+            name: 'ACTION_TYPE',
+            choices: ['deploy', 'register', 'restart', 'remove', 'status'],
+            description: 'Action to perform on Jenkins SSH agents'
+        )
+        string(
+            name: 'TARGET_HOSTS',
+            defaultValue: '',
+            description: 'Specific hosts to target (comma-separated, e.g., pi1,pi2). Leave empty for all.'
+        )
+        string(
+            name: 'SERIAL_PERCENTAGE',
+            defaultValue: '50%',
+            description: 'Percentage of hosts to update at once (e.g., 25%, 50%, 100%)'
+        )
+        booleanParam(
+            name: 'DRY_RUN',
+            defaultValue: false,
+            description: 'Perform a dry run without making changes'
+        )
+        booleanParam(
+            name: 'BUILD_IMAGE',
+            defaultValue: false,
+            description: 'Build and push Docker image before deployment'
+        )
+    }
+    
+    environment {
+        ANSIBLE_HOST_KEY_CHECKING = 'False'
+        ANSIBLE_ROLES_PATH = "${WORKSPACE}/ansible/roles"
+        INVENTORY_PATH = "${WORKSPACE}/ansible/inventories/homelab/hosts"
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+        
+        stage('Validate Environment') {
+            steps {
+                script {
+                    // Check for required credentials
+                    withCredentials([
+                        sshUserPrivateKey(credentialsId: 'jenkins-ssh-key', keyFileVariable: 'SSH_KEY_FILE', usernameVariable: 'SSH_USER'),
+                        string(credentialsId: 'jenkins-api-token', variable: 'JENKINS_API_TOKEN')
+                    ]) {
+                        sh '''
+                            if [ -z "$JENKINS_URL" ]; then
+                                echo "ERROR: JENKINS_URL must be set in Jenkins configuration"
+                                exit 1
+                            fi
+                            echo "Jenkins URL: $JENKINS_URL"
+                            echo "Action: ${ACTION_TYPE}"
+                            echo "Target Hosts: ${TARGET_HOSTS:-all raspberrypi hosts}"
+                            
+                            # Extract public key from private key
+                            export JENKINS_AGENT_SSH_PUBKEY=$(ssh-keygen -y -f "$SSH_KEY_FILE")
+                            echo "SSH Public Key generated successfully"
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('Build Docker Image') {
+            when {
+                expression { params.BUILD_IMAGE && params.ACTION_TYPE == 'deploy' }
+            }
+            steps {
+                withCredentials([
+                    usernamePassword(credentialsId: 'docker-registry', usernameVariable: 'REGISTRY_USERNAME', passwordVariable: 'REGISTRY_PASSWORD')
+                ]) {
+                    script {
+                        def extraArgs = []
+                        
+                        if (params.DRY_RUN) {
+                            extraArgs.add("--check")
+                        }
+                        
+                        sh """
+                            ansible-playbook \
+                                ansible/playbooks/build_jenkins_ssh_agent_image.yml \
+                                -e "registry_username=${REGISTRY_USERNAME}" \
+                                -e "registry_password=${REGISTRY_PASSWORD}" \
+                                ${extraArgs.join(' ')} \
+                                -v
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Deploy SSH Agents') {
+            when {
+                expression { params.ACTION_TYPE == 'deploy' }
+            }
+            steps {
+                withCredentials([
+                    sshUserPrivateKey(credentialsId: 'jenkins-ssh-key', keyFileVariable: 'SSH_KEY_FILE', usernameVariable: 'SSH_USER')
+                ]) {
+                    script {
+                        // Extract public key from private key
+                        sh 'export JENKINS_AGENT_SSH_PUBKEY=$(ssh-keygen -y -f "$SSH_KEY_FILE")'
+                        
+                        def extraArgs = []
+                        
+                        if (params.TARGET_HOSTS) {
+                            extraArgs.add("--limit ${params.TARGET_HOSTS}")
+                        }
+                        
+                        if (params.DRY_RUN) {
+                            extraArgs.add("--check")
+                        }
+                        
+                        if (params.SERIAL_PERCENTAGE != '100%') {
+                            extraArgs.add("-e serial_percentage=${params.SERIAL_PERCENTAGE}")
+                        }
+                        
+                        sh """
+                            export JENKINS_AGENT_SSH_PUBKEY=\$(ssh-keygen -y -f "$SSH_KEY_FILE")
+                            ansible-playbook \
+                                -i ${INVENTORY_PATH} \
+                                ansible/playbooks/deploy_jenkins_ssh_agent.yml \
+                                ${extraArgs.join(' ')} \
+                                -v
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Register Nodes') {
+            when {
+                expression { params.ACTION_TYPE == 'register' || (params.ACTION_TYPE == 'deploy' && !params.DRY_RUN) }
+            }
+            steps {
+                withCredentials([
+                    string(credentialsId: 'jenkins-api-token', variable: 'JENKINS_TOKEN')
+                ]) {
+                    script {
+                        def hostArg = params.TARGET_HOSTS ? "--hosts ${params.TARGET_HOSTS}" : ""
+                        
+                        sh """
+                            export JENKINS_TOKEN="${JENKINS_TOKEN}"
+                            export JENKINS_USER="admin"
+                            ${WORKSPACE}/scripts/register-jenkins-ssh-nodes.sh ${hostArg}
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Restart Agents') {
+            when {
+                expression { params.ACTION_TYPE == 'restart' }
+            }
+            steps {
+                script {
+                    def limitArg = params.TARGET_HOSTS ? "--limit ${params.TARGET_HOSTS}" : ""
+                    
+                    sh """
+                        ansible raspberrypi \
+                            -i ${INVENTORY_PATH} \
+                            ${limitArg} \
+                            -m shell \
+                            -a 'docker-compose -f /opt/jenkins-ssh-agent/compose/docker-compose.yml restart' \
+                            -e ansible_python_interpreter=/usr/bin/python3
+                    """
+                }
+            }
+        }
+        
+        stage('Remove Agents') {
+            when {
+                expression { params.ACTION_TYPE == 'remove' }
+            }
+            steps {
+                script {
+                    if (params.DRY_RUN) {
+                        echo "DRY RUN: Would remove agents from: ${params.TARGET_HOSTS ?: 'all hosts'}"
+                    } else {
+                        // First remove from Jenkins
+                        withCredentials([
+                            string(credentialsId: 'jenkins-api-token', variable: 'JENKINS_TOKEN')
+                        ]) {
+                            def hostArg = params.TARGET_HOSTS ? "--hosts ${params.TARGET_HOSTS}" : ""
+                            
+                            sh """
+                                export JENKINS_TOKEN="${JENKINS_TOKEN}"
+                                export JENKINS_USER="admin"
+                                ${WORKSPACE}/scripts/register-jenkins-ssh-nodes.sh --remove ${hostArg}
+                            """
+                        }
+                        
+                        // Then remove containers
+                        def limitArg = params.TARGET_HOSTS ? "--limit ${params.TARGET_HOSTS}" : ""
+                        
+                        sh """
+                            ansible raspberrypi \
+                                -i ${INVENTORY_PATH} \
+                                ${limitArg} \
+                                -m shell \
+                                -a 'docker-compose -f /opt/jenkins-ssh-agent/compose/docker-compose.yml down && docker rm -f jenkins-ssh-agent || true' \
+                                -e ansible_python_interpreter=/usr/bin/python3
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Check Status') {
+            when {
+                expression { params.ACTION_TYPE == 'status' }
+            }
+            steps {
+                script {
+                    def limitArg = params.TARGET_HOSTS ? "--limit ${params.TARGET_HOSTS}" : ""
+                    
+                    // Check container status
+                    sh """
+                        echo "=== SSH Agent Container Status ==="
+                        ansible raspberrypi \
+                            -i ${INVENTORY_PATH} \
+                            ${limitArg} \
+                            -m shell \
+                            -a 'echo "Host: \$(hostname) - IP: \$(hostname -I | cut -d" " -f1)" && docker ps --filter name=jenkins-ssh-agent --format "Container: {{.Names}} - Status: {{.Status}} - Ports: {{.Ports}}"' \
+                            -e ansible_python_interpreter=/usr/bin/python3
+                    """
+                    
+                    // Check Jenkins node status
+                    withCredentials([
+                        string(credentialsId: 'jenkins-api-token', variable: 'JENKINS_TOKEN')
+                    ]) {
+                        sh """
+                            echo -e "\n=== Jenkins Node Status ==="
+                            export JENKINS_TOKEN="${JENKINS_TOKEN}"
+                            export JENKINS_USER="admin"
+                            ${WORKSPACE}/scripts/register-jenkins-ssh-nodes.sh --list
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Health Check') {
+            when {
+                expression { params.ACTION_TYPE == 'deploy' && !params.DRY_RUN }
+            }
+            steps {
+                script {
+                    def limitArg = params.TARGET_HOSTS ? "--limit ${params.TARGET_HOSTS}" : ""
+                    
+                    sh """
+                        echo "Waiting for SSH agents to be ready..."
+                        sleep 20
+                        
+                        echo "=== SSH Port Connectivity ==="
+                        ansible raspberrypi \
+                            -i ${INVENTORY_PATH} \
+                            ${limitArg} \
+                            -m shell \
+                            -a 'nc -zv localhost 2222 2>&1 | head -1' \
+                            -e ansible_python_interpreter=/usr/bin/python3
+                    """
+                    
+                    // Check node connectivity in Jenkins
+                    withCredentials([
+                        string(credentialsId: 'jenkins-api-token', variable: 'JENKINS_TOKEN')
+                    ]) {
+                        sh """
+                            echo -e "\n=== Jenkins Node Connectivity ==="
+                            export JENKINS_TOKEN="${JENKINS_TOKEN}"
+                            export JENKINS_USER="admin"
+                            
+                            # Give nodes time to connect
+                            sleep 10
+                            
+                            # Check node status
+                            ${WORKSPACE}/scripts/register-jenkins-ssh-nodes.sh --list
+                        """
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo "Jenkins SSH agent ${params.ACTION_TYPE} completed successfully"
+            
+            script {
+                if (params.ACTION_TYPE == 'deploy' && !params.DRY_RUN) {
+                    currentBuild.description = "Deployed SSH agents to: ${params.TARGET_HOSTS ?: 'all hosts'}"
+                } else {
+                    currentBuild.description = "${params.ACTION_TYPE} on: ${params.TARGET_HOSTS ?: 'all hosts'}"
+                }
+            }
+        }
+        
+        failure {
+            echo "Jenkins SSH agent ${params.ACTION_TYPE} failed"
+            currentBuild.description = "Failed: ${params.ACTION_TYPE}"
+        }
+        
+        always {
+            // Clean up workspace
+            cleanWs()
+        }
+    }
+}

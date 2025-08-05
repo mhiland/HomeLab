@@ -1,0 +1,21 @@
+services:
+  jenkins-ssh-agent:
+    image: {{ jenkins_ssh_agent_image }}
+    container_name: {{ jenkins_ssh_agent_container_name }}
+    restart: {{ jenkins_ssh_agent_restart_policy }}
+    environment:
+      - JENKINS_AGENT_SSH_PUBKEY={{ jenkins_agent_ssh_pubkey }}
+    ports:
+      - "{{ jenkins_ssh_agent_ssh_port }}:22"
+    volumes:
+      - {{ jenkins_ssh_agent_data_dir }}/workspace:/home/jenkins/agent
+      - /var/run/docker.sock:/var/run/docker.sock
+    mem_limit: {{ jenkins_ssh_agent_memory_limit }}
+    cpus: {{ jenkins_ssh_agent_cpu_limit }}
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "22"]
+      interval: {{ jenkins_ssh_agent_health_check_interval }}
+      timeout: {{ jenkins_ssh_agent_health_check_timeout }}
+      retries: {{ jenkins_ssh_agent_health_check_retries }}
+    labels:
+      - "jenkins.agent.name={{ jenkins_agent_name }}"
