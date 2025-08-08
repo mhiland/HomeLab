@@ -1,0 +1,21 @@
+---
+# Debsums role defaults
+
+# Basic settings
+debsums_report_dir: /var/lib/debsums/reports
+debsums_enable_timer: true
+debsums_report_retention_days: 30
+
+# Email notifications
+debsums_email_alerts: false
+debsums_email_to: "root@localhost"
+debsums_email_from: "debsums@{{ ansible_hostname }}"
+
+# Scheduling (weekly by default)
+debsums_schedule: "Sun *-*-* 03:00:00"  # Sunday at 3 AM
+debsums_randomized_delay: 1800  # Random delay up to 30 minutes
+
+# Resource limits for Raspberry Pi
+debsums_memory_limit: 512M
+debsums_timeout: 1800  # 30 minutes
+debsums_nice_level: 10  # Lower priority

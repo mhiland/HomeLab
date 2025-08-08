@@ -1,0 +1,13 @@
+[Unit]
+Description=Debsums Package Integrity Check Timer
+Documentation=man:debsums(1)
+Requires=debsums-check.service
+
+[Timer]
+# Run weekly at {{ debsums_schedule | default('Sunday 03:00') }}
+OnCalendar={{ debsums_schedule | default('Sun *-*-* 03:00:00') }}
+Persistent=true
+RandomizedDelaySec={{ debsums_randomized_delay | default('1800') }}
+
+[Install]
+WantedBy=timers.target

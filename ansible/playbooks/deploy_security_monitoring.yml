@@ -1,0 +1,103 @@
+---
+- name: Deploy Security Monitoring Tools
+  hosts: all
+  become: yes
+  gather_facts: yes
+  
+  vars:
+    security_tools_report_base: "{{ report_dir | default('/var/lib/security-reports') }}"
+    
+  pre_tasks:
+    - name: Create security reports base directory
+      file:
+        path: "{{ security_tools_report_base }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+    
+    - name: Display target host information
+      debug:
+        msg: |
+          Deploying security monitoring to: {{ inventory_hostname }}
+          OS Family: {{ ansible_os_family }}
+          Architecture: {{ ansible_architecture }}
+          Distribution: {{ ansible_distribution }} {{ ansible_distribution_version }}
+
+  tasks:
+    - name: Deploy RKhunter
+      include_role:
+        name: rkhunter
+      vars:
+        rkhunter_report_dir: "{{ security_tools_report_base }}/rkhunter"
+        rkhunter_scan_frequency: "daily"
+        rkhunter_email_notify: true
+      tags: [rkhunter, rootkit-detection]
+
+    - name: Deploy Chkrootkit  
+      include_role:
+        name: chkrootkit
+      vars:
+        chkrootkit_report_dir: "{{ security_tools_report_base }}/chkrootkit"
+        chkrootkit_scan_frequency: "daily"
+        chkrootkit_email_notify: true
+      tags: [chkrootkit, rootkit-detection]
+
+    - name: Deploy AIDE
+      include_role:
+        name: aide
+      vars:
+        aide_report_dir: "{{ security_tools_report_base }}/aide"
+        aide_scan_frequency: "daily"
+        aide_email_notify: true
+      tags: [aide, file-integrity]
+
+    - name: Deploy Debsums
+      include_role:
+        name: debsums
+      vars:
+        debsums_report_dir: "{{ security_tools_report_base }}/debsums"
+        debsums_scan_frequency: "weekly"
+      when: ansible_os_family == "Debian"
+      tags: [debsums, package-integrity]
+
+    - name: Deploy Fail2ban
+      include_role:
+        name: fail2ban
+      vars:
+        fail2ban_report_dir: "{{ security_tools_report_base }}/fail2ban"
+      tags: [fail2ban, intrusion-prevention]
+
+    - name: Deploy Security Scanner Orchestrator
+      include_role:
+        name: security_scanner
+      vars:
+        scanner_report_dir: "{{ security_tools_report_base }}"
+        scanner_enable_all: true
+      tags: [security-scanner, orchestration]
+
+  post_tasks:
+    - name: Create consolidated security scan script
+      template:
+        src: security_scan_all.sh.j2
+        dest: /usr/local/bin/security-scan-all.sh
+        owner: root
+        group: root
+        mode: '0755'
+      tags: [consolidated-script]
+
+    - name: Display deployment summary
+      debug:
+        msg: |
+          Security monitoring deployment completed for {{ inventory_hostname }}
+          
+          Deployed Tools:
+          - RKhunter: Rootkit detection and system scanning
+          - Chkrootkit: Alternative rootkit scanner  
+          - AIDE: Advanced intrusion detection and file integrity
+          - {{ 'Debsums: Package integrity verification' if ansible_os_family == 'Debian' else 'Debsums: Skipped (not Debian/Ubuntu)' }}
+          - Fail2ban: Intrusion prevention system
+          
+          Reports Location: {{ security_tools_report_base }}
+          
+          Manual Scan Command: /usr/local/bin/security-scan-all.sh

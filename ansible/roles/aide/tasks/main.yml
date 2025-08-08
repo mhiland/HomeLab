@@ -1,0 +1,95 @@
+---
+# AIDE role - Advanced Intrusion Detection Environment
+- name: Update package cache
+  package:
+    update_cache: yes
+  when: ansible_os_family in ['Debian', 'RedHat']
+
+- name: Install AIDE
+  package:
+    name: aide
+    state: present
+
+- name: Create AIDE configuration directory
+  file:
+    path: /etc/aide
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Deploy AIDE configuration
+  template:
+    src: aide.conf.j2
+    dest: /etc/aide/aide.conf
+    owner: root
+    group: root
+    mode: '0644'
+    backup: yes
+  notify: initialize aide database
+
+- name: Create AIDE reports directory
+  file:
+    path: "{{ aide_report_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Create AIDE log directory
+  file:
+    path: /var/log/aide
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Deploy AIDE scan script
+  template:
+    src: aide-check.sh.j2
+    dest: /usr/local/bin/aide-check.sh
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Create systemd service for AIDE checking
+  template:
+    src: aide-check.service.j2
+    dest: /etc/systemd/system/aide-check.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: reload systemd
+
+- name: Create systemd timer for AIDE checking
+  template:
+    src: aide-check.timer.j2
+    dest: /etc/systemd/system/aide-check.timer
+    owner: root
+    group: root
+    mode: '0644'
+  notify: reload systemd
+
+- name: Enable and start AIDE check timer
+  systemd:
+    name: aide-check.timer
+    enabled: yes
+    state: started
+    daemon_reload: yes
+  when: aide_enable_timer | default(true)
+
+- name: Check if AIDE database exists
+  stat:
+    path: /var/lib/aide/aide.db
+  register: aide_db_stat
+
+- name: Initialize AIDE database if it doesn't exist
+  shell: |
+    LC_ALL=C LANG=C aide --config={{ aide_config_path }} --init
+  environment:
+    LC_ALL: C
+    LANG: C
+  when: not aide_db_stat.stat.exists
+  async: "{{ aide_init_timeout }}"
+  poll: 30
+  notify: move aide database

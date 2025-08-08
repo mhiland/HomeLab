@@ -1,0 +1,64 @@
+---
+# Debsums role - Package integrity verification for Debian/Ubuntu systems
+- name: Update package cache
+  package:
+    update_cache: yes
+  when: ansible_os_family == "Debian"
+
+- name: Install debsums and dependencies
+  package:
+    name:
+      - debsums
+      - libfile-fnmatch-perl
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Create debsums reports directory
+  file:
+    path: "{{ debsums_report_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Create debsums log directory
+  file:
+    path: /var/log/debsums
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Deploy debsums check script
+  template:
+    src: debsums-check.sh.j2
+    dest: /usr/local/bin/debsums-check.sh
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Create systemd service for debsums checking
+  template:
+    src: debsums-check.service.j2
+    dest: /etc/systemd/system/debsums-check.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: reload systemd
+
+- name: Create systemd timer for debsums checking
+  template:
+    src: debsums-check.timer.j2
+    dest: /etc/systemd/system/debsums-check.timer
+    owner: root
+    group: root
+    mode: '0644'
+  notify: reload systemd
+
+- name: Enable and start debsums check timer
+  systemd:
+    name: debsums-check.timer
+    enabled: yes
+    state: started
+    daemon_reload: yes
+  when: debsums_enable_timer | default(true)

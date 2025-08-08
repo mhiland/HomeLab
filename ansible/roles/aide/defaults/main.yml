@@ -1,0 +1,30 @@
+---
+# AIDE role defaults
+
+# AIDE configuration
+aide_config_path: /etc/aide/aide.conf
+aide_database_path: /var/lib/aide/aide.db
+aide_database_new_path: /var/lib/aide/aide.db.new
+
+# Reporting settings
+aide_report_dir: /var/lib/aide/reports
+aide_report_retention_days: 30
+aide_email_alerts: false
+aide_email_to: "root@localhost"
+aide_email_from: "aide@{{ ansible_hostname }}"
+
+# Scheduling
+aide_enable_timer: true
+aide_schedule: "*-*-* 02:00:00"  # Daily at 2 AM
+aide_randomized_delay: 600  # Random delay up to 10 minutes
+
+# Resource limits
+aide_memory_limit: 1G
+aide_timeout: 1800  # 30 minutes
+
+# Security settings for Raspberry Pi
+aide_nice_level: 19  # Low priority on resource-constrained systems
+aide_ionice_class: 3  # Idle I/O priority
+
+# Database initialization timeout (seconds)
+aide_init_timeout: 3600  # 1 hour for initial database creation

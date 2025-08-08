@@ -1,0 +1,22 @@
+---
+# AIDE role handlers
+
+- name: reload systemd
+  systemd:
+    daemon_reload: yes
+
+- name: initialize aide database
+  shell: |
+    LC_ALL=C LANG=C aide --config={{ aide_config_path }} --init
+  args:
+    creates: "{{ aide_database_new_path }}"
+  async: "{{ aide_init_timeout }}"
+  poll: 30
+
+- name: move aide database
+  shell: |
+    if [ -f "{{ aide_database_new_path }}" ]; then
+      mv "{{ aide_database_new_path }}" "{{ aide_database_path }}"
+      echo "AIDE database moved to production location"
+    fi
+  when: aide_database_new_path is defined

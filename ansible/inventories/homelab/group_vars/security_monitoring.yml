@@ -1,0 +1,227 @@
+---
+# Security Monitoring Configuration
+# Global security settings for HomeLab infrastructure
+
+# Email notifications
+security_email_notify: true
+security_email_address: "security-team@{{ ansible_domain | default('homelab.local') }}"
+security_smtp_server: "localhost"
+
+# Report retention and storage
+security_report_base_dir: "/var/lib/security-reports"
+security_report_retention_days: 30
+security_log_retention_days: 90
+
+# Scan scheduling
+security_scan_frequency:
+  rkhunter: "daily"
+  chkrootkit: "daily"
+  aide: "daily"
+  debsums: "weekly"
+  fail2ban: "continuous"
+
+# Performance and resource limits
+security_max_parallel_scans: 2
+security_scan_nice_level: 10
+security_scan_ionice_class: 3
+
+# RKhunter configuration
+rkhunter_config:
+  # Enhanced configuration for HomeLab environment
+  disable_tests: "suspscan hidden_procs deleted_files packet_cap_apps"
+  suppress_warnings: ""
+  hash_func: "SHA256"
+  pkgmgr: "{{ 'DPKG' if ansible_os_family == 'Debian' else 'RPM' }}"
+  mail_on_warning: "{{ security_email_address }}"
+  update_mirrors: 1
+  auto_x_detect: 1
+  allow_ssh_root_user: "no"
+  allow_ssh_prot_v1: 0
+  
+  # Custom whitelist for HomeLab
+  rtkt_file_whitelist: "/usr/bin/lwp-request /usr/bin/GET /usr/bin/HEAD /usr/bin/POST"
+  port_whitelist: "22 80 443 8080 9090 3000"
+  
+  # Docker and container considerations
+  scan_mode_dev: "THOROUGH"
+
+# Chkrootkit configuration
+chkrootkit_config:
+  quiet: false
+  expert: false
+  debug: false
+
+chkrootkit_exclusions:
+  - "bindshell"
+  - "lkm" 
+  - "rexedcs"
+  - "sniffer"
+
+# AIDE configuration
+aide_config:
+  database_path: "/var/lib/aide/aide.db"
+  database_new_path: "/var/lib/aide/aide.db.new"
+  gzip_dbout: "yes"
+  verbose: 5
+  report_summarize_changes: "yes"
+  report_detailed_init: "no"
+  report_base16: "no"
+  report_quiet: "no"
+  report_append: "no"
+  report_ignore_added_attrs: ""
+  report_ignore_removed_attrs: ""
+  report_ignore_changed_attrs: ""
+  
+  # File selection rules for HomeLab
+  selection_rules:
+    - path: "/bin"
+      rule: "p+u+g+s+m+c+md5"
+    - path: "/sbin"
+      rule: "p+u+g+s+m+c+md5"
+    - path: "/usr/bin"
+      rule: "p+u+g+s+m+c+md5"
+    - path: "/usr/sbin"
+      rule: "p+u+g+s+m+c+md5"
+    - path: "/usr/local/bin"
+      rule: "p+u+g+s+m+c+md5"
+    - path: "/etc"
+      rule: "p+u+g+s+m+c+md5"
+    - path: "/root"
+      rule: "p+u+g+s+m+c+md5"
+    
+    # Exclusions
+    - path: "/var/log"
+      rule: "!"
+    - path: "/var/cache"
+      rule: "!"
+    - path: "/tmp"
+      rule: "!"
+    - path: "/proc"
+      rule: "!"
+    - path: "/sys"
+      rule: "!"
+    - path: "/dev"
+      rule: "!"
+
+# Debsums configuration (Debian/Ubuntu only)
+debsums_config:
+  check_config_files: true
+  generate_missing: true
+  silent: false
+  all_packages: false
+  changed_only: true
+
+# Fail2ban configuration
+fail2ban_config:
+  # Basic jail settings
+  default_backend: "systemd"
+  bantime: 600
+  findtime: 600
+  maxretry: 5
+  
+  # Email settings
+  destemail: "{{ security_email_address }}"
+  sendername: "Fail2ban-{{ ansible_hostname }}"
+  mta: "sendmail"
+  
+  # Jails to enable
+  enabled_jails:
+    - name: "sshd"
+      port: "ssh"
+      logpath: "/var/log/auth.log"
+      maxretry: 3
+      
+    - name: "nginx-http-auth"
+      port: "http,https"
+      logpath: "/var/log/nginx/error.log"
+      
+    - name: "nginx-limit-req"
+      port: "http,https"
+      logpath: "/var/log/nginx/error.log"
+
+# Architecture-specific optimizations
+security_optimizations:
+  # Raspberry Pi specific settings
+  raspberry_pi:
+    rkhunter_disable_tests: "suspscan hidden_procs deleted_files packet_cap_apps apps"
+    aide_database_compression: true
+    scan_nice_level: 19
+    max_parallel_scans: 1
+    
+  # x86_64 specific settings  
+  x86_64:
+    rkhunter_disable_tests: "suspscan"
+    aide_database_compression: false
+    scan_nice_level: 10
+    max_parallel_scans: 4
+
+# Integration with existing monitoring
+prometheus_metrics:
+  enabled: true
+  port: 9100
+  path: "/metrics"
+  security_metrics:
+    - "security_scan_duration_seconds"
+    - "security_findings_total"
+    - "security_scan_last_success_timestamp"
+    - "security_database_last_update_timestamp"
+
+# Wazuh integration
+wazuh_integration:
+  enabled: true
+  agent_config_additions:
+    - "<localfile>"
+    - "  <log_format>syslog</log_format>"
+    - "  <location>/var/log/rkhunter/rkhunter.log</location>"
+    - "</localfile>"
+    - "<localfile>"
+    - "  <log_format>syslog</log_format>"
+    - "  <location>/var/log/aide/aide.log</location>"
+    - "</localfile>"
+
+# Notification thresholds
+notification_thresholds:
+  critical:
+    - "rootkit detected"
+    - "system compromised"
+    - "file integrity violation in /etc/passwd"
+    - "unauthorized access detected"
+    
+  high:
+    - "suspicious network activity"
+    - "file integrity violation in /etc/"
+    - "package verification failure"
+    - "multiple failed login attempts"
+    
+  medium:
+    - "configuration file changes"
+    - "new network connections"
+    - "log file modifications"
+    
+  low:
+    - "informational security events"
+    - "routine security checks completed"
+
+# Environment-specific overrides
+production:
+  security_scan_frequency:
+    rkhunter: "daily"
+    chkrootkit: "daily" 
+    aide: "daily"
+    debsums: "daily"
+  notification_thresholds:
+    # More sensitive in production
+    medium:
+      - "any configuration changes"
+      - "any new processes"
+      
+development:
+  security_scan_frequency:
+    rkhunter: "weekly"
+    chkrootkit: "weekly"
+    aide: "weekly"
+    debsums: "monthly"
+  notification_thresholds:
+    # Less sensitive in development
+    critical:
+      - "actual security breaches only"

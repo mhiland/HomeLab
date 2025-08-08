@@ -1,0 +1,84 @@
+---
+- name: Full Security Scan
+  hosts: all
+  become: yes
+  gather_facts: yes
+  serial: "{{ max_parallel_hosts | default(4) }}"
+  
+  vars:
+    scan_timestamp: "{{ ansible_date_time.epoch }}"
+    scan_report_dir: "{{ report_dir | default('/tmp/security-scan-' + scan_timestamp) }}"
+    
+  pre_tasks:
+    - name: Create scan report directory
+      file:
+        path: "{{ scan_report_dir }}/{{ inventory_hostname }}"
+        state: directory
+        mode: '0755'
+      delegate_to: localhost
+      run_once_per_host: true
+
+    - name: Start scan logging
+      lineinfile:
+        path: "{{ scan_report_dir }}/scan.log"
+        line: "{{ ansible_date_time.iso8601 }} - Starting full security scan on {{ inventory_hostname }}"
+        create: yes
+      delegate_to: localhost
+
+  tasks:
+    - name: Run RKhunter scan
+      command: /usr/local/bin/rkhunter-scan.sh
+      register: rkhunter_result
+      failed_when: rkhunter_result.rc > 1
+      tags: [rkhunter]
+
+    - name: Run Chkrootkit scan
+      command: /usr/local/bin/chkrootkit-scan.sh
+      register: chkrootkit_result
+      failed_when: chkrootkit_result.rc > 1
+      tags: [chkrootkit]
+
+    - name: Run AIDE check
+      command: /usr/local/bin/aide-check.sh
+      register: aide_result
+      failed_when: aide_result.rc > 1
+      tags: [aide]
+
+    - name: Run package integrity check (Debian/Ubuntu)
+      command: /usr/local/bin/debsums-check.sh
+      register: debsums_result
+      failed_when: debsums_result.rc > 1
+      when: ansible_os_family == "Debian"
+      tags: [debsums]
+
+    - name: Collect security scan results
+      fetch:
+        src: "{{ item }}"
+        dest: "{{ scan_report_dir }}/{{ inventory_hostname }}/"
+        flat: yes
+      loop:
+        - "/var/lib/rkhunter/reports/rkhunter-report-*.txt"
+        - "/var/lib/chkrootkit/reports/chkrootkit-report-*.txt"  
+        - "/var/lib/aide/reports/aide-report-*.txt"
+        - "/var/lib/debsums/reports/debsums-report-*.txt"
+      ignore_errors: yes
+      tags: [collection]
+
+  post_tasks:
+    - name: Generate host summary
+      template:
+        src: security_scan_summary.j2
+        dest: "{{ scan_report_dir }}/{{ inventory_hostname }}/summary.json"
+      vars:
+        host_results:
+          rkhunter: "{{ rkhunter_result | default({'rc': -1}) }}"
+          chkrootkit: "{{ chkrootkit_result | default({'rc': -1}) }}"
+          aide: "{{ aide_result | default({'rc': -1}) }}"
+          debsums: "{{ debsums_result | default({'rc': -1}) }}"
+      delegate_to: localhost
+
+    - name: Complete scan logging
+      lineinfile:
+        path: "{{ scan_report_dir }}/scan.log"
+        line: "{{ ansible_date_time.iso8601 }} - Completed security scan on {{ inventory_hostname }}"
+      delegate_to: localhost

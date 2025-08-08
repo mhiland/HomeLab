@@ -1,0 +1,19 @@
+---
+# Default variables for chkrootkit role
+chkrootkit_report_dir: "/var/lib/chkrootkit/reports"
+chkrootkit_enable_timer: true
+chkrootkit_scan_frequency: "daily"
+chkrootkit_email_notify: false
+chkrootkit_email_address: "admin@{{ ansible_domain | default('localhost') }}"
+
+# Chkrootkit configuration
+chkrootkit_config:
+  quiet: true
+  expert: false
+  debug: false
+  
+# Exclusions for known false positives
+chkrootkit_exclusions:
+  - "bindshell"
+  - "lkm"
+  - "rexedcs"

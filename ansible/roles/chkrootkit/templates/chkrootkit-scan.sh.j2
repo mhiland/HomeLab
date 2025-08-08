@@ -1,0 +1,121 @@
+#!/bin/bash
+# Chkrootkit scan script
+# Managed by Ansible - Do not edit manually
+
+set -euo pipefail
+
+# Configuration
+REPORT_DIR="{{ chkrootkit_report_dir }}"
+LOG_FILE="/var/log/chkrootkit/scan-$(date +%Y%m%d_%H%M%S).log"
+REPORT_FILE="${REPORT_DIR}/chkrootkit-report-$(date +%Y%m%d_%H%M%S).txt"
+LOCK_FILE="/var/lock/chkrootkit-scan.lock"
+EMAIL="{{ chkrootkit_email_address }}"
+HOSTNAME=$(hostname -f)
+
+# Functions
+log_message() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "${LOG_FILE}"
+}
+
+cleanup() {
+    rm -f "${LOCK_FILE}"
+}
+
+trap cleanup EXIT
+
+# Check for existing lock
+if [ -f "${LOCK_FILE}" ]; then
+    log_message "ERROR: Another chkrootkit scan is already running. Exiting."
+    exit 1
+fi
+
+# Create lock file
+echo $$ > "${LOCK_FILE}"
+
+log_message "Starting Chkrootkit scan on ${HOSTNAME}"
+
+# Ensure directories exist
+mkdir -p "$(dirname "${LOG_FILE}")" "${REPORT_DIR}"
+
+# Perform the scan
+log_message "Performing Chkrootkit scan..."
+SCAN_EXIT_CODE=0
+
+# Run chkrootkit with configured options
+CHKROOTKIT_OPTS=""
+{% if chkrootkit_config.quiet %}
+CHKROOTKIT_OPTS="${CHKROOTKIT_OPTS} -q"
+{% endif %}
+{% if chkrootkit_config.expert %}
+CHKROOTKIT_OPTS="${CHKROOTKIT_OPTS} -x"
+{% endif %}
+{% if chkrootkit_config.debug %}
+CHKROOTKIT_OPTS="${CHKROOTKIT_OPTS} -d"
+{% endif %}
+
+chkrootkit ${CHKROOTKIT_OPTS} 2>&1 | tee "${REPORT_FILE}" || SCAN_EXIT_CODE=$?
+
+# Filter out known false positives if exclusions are defined
+{% if chkrootkit_exclusions is defined %}
+TEMP_REPORT="${REPORT_FILE}.tmp"
+cp "${REPORT_FILE}" "${TEMP_REPORT}"
+{% for exclusion in chkrootkit_exclusions %}
+grep -v "{{ exclusion }}" "${TEMP_REPORT}" > "${REPORT_FILE}" || true
+mv "${REPORT_FILE}" "${TEMP_REPORT}"
+{% endfor %}
+mv "${TEMP_REPORT}" "${REPORT_FILE}"
+{% endif %}
+
+# Analyze results
+if [ ${SCAN_EXIT_CODE} -eq 0 ]; then
+    # Check if any infections were found
+    if grep -q "INFECTED" "${REPORT_FILE}"; then
+        log_message "Chkrootkit scan found potential infections"
+        SUBJECT="[Chkrootkit] INFECTIONS DETECTED on ${HOSTNAME}"
+        PRIORITY="CRITICAL"
+        SCAN_EXIT_CODE=2
+    else
+        log_message "Chkrootkit scan completed successfully - no issues found"
+        SUBJECT="[Chkrootkit] Clean scan on ${HOSTNAME}"
+        PRIORITY="INFO"
+    fi
+else
+    log_message "Chkrootkit scan failed with exit code ${SCAN_EXIT_CODE}"
+    SUBJECT="[Chkrootkit] Scan failed on ${HOSTNAME}"
+    PRIORITY="ERROR"
+fi
+
+# Generate summary
+{
+    echo "Chkrootkit Security Scan Report"
+    echo "==============================="
+    echo "Host: ${HOSTNAME}"
+    echo "Date: $(date)"
+    echo "Exit Code: ${SCAN_EXIT_CODE}"
+    echo "Priority: ${PRIORITY}"
+    echo ""
+    echo "Report Details:"
+    echo "---------------"
+    cat "${REPORT_FILE}"
+} > "${REPORT_FILE}.summary"
+
+# Send email notification if configured and issues found
+{% if chkrootkit_email_notify %}
+if [ -n "${EMAIL}" ] && [ "${SCAN_EXIT_CODE}" -ne 0 ]; then
+    log_message "Sending email notification to ${EMAIL}"
+    if command -v mail >/dev/null 2>&1; then
+        mail -s "${SUBJECT}" "${EMAIL}" < "${REPORT_FILE}.summary" || log_message "WARNING: Failed to send email"
+    else
+        log_message "WARNING: mail command not available for notifications"
+    fi
+fi
+{% endif %}
+
+# Cleanup old reports (keep last 30 days)
+find "${REPORT_DIR}" -name "chkrootkit-report-*.txt*" -type f -mtime +30 -delete 2>/dev/null || true
+find "/var/log/chkrootkit" -name "scan-*.log" -type f -mtime +30 -delete 2>/dev/null || true
+
+log_message "Chkrootkit scan completed with exit code ${SCAN_EXIT_CODE}"
+
+# Exit with original scan exit code for monitoring
+exit ${SCAN_EXIT_CODE}

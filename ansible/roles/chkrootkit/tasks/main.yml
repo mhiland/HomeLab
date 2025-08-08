@@ -1,0 +1,70 @@
+---
+# chkrootkit role - Chkrootkit installation and configuration
+- name: Update package cache
+  package:
+    update_cache: yes
+  when: ansible_os_family in ['Debian', 'RedHat']
+
+- name: Install chkrootkit
+  package:
+    name: chkrootkit
+    state: present
+
+- name: Create chkrootkit reports directory
+  file:
+    path: "{{ chkrootkit_report_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Create chkrootkit log directory
+  file:
+    path: /var/log/chkrootkit
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Deploy chkrootkit scan script
+  template:
+    src: chkrootkit-scan.sh.j2
+    dest: /usr/local/bin/chkrootkit-scan.sh
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Create systemd service for chkrootkit scanning
+  template:
+    src: chkrootkit-scan.service.j2
+    dest: /etc/systemd/system/chkrootkit-scan.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: reload systemd
+
+- name: Create systemd timer for chkrootkit scanning
+  template:
+    src: chkrootkit-scan.timer.j2
+    dest: /etc/systemd/system/chkrootkit-scan.timer
+    owner: root
+    group: root
+    mode: '0644'
+  notify: reload systemd
+
+- name: Enable and start chkrootkit scan timer
+  systemd:
+    name: chkrootkit-scan.timer
+    enabled: yes
+    state: started
+    daemon_reload: yes
+  when: chkrootkit_enable_timer | default(true)
+
+- name: Create chkrootkit exclusions file
+  template:
+    src: chkrootkit-exclusions.txt.j2
+    dest: /etc/chkrootkit/exclusions.txt
+    owner: root
+    group: root
+    mode: '0644'
+  when: chkrootkit_exclusions is defined

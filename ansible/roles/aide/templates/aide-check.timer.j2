@@ -1,0 +1,13 @@
+[Unit]
+Description=AIDE Integrity Check Timer
+Documentation=man:aide(1)
+Requires=aide-check.service
+
+[Timer]
+# Run daily at {{ aide_schedule | default('02:00') }}
+OnCalendar={{ aide_schedule | default('*-*-* 02:00:00') }}
+Persistent=true
+RandomizedDelaySec={{ aide_randomized_delay | default('600') }}
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,16 @@
+---
+# Handlers for rkhunter role
+- name: update rkhunter database
+  command: rkhunter --update --nocolors
+  listen: "update rkhunter database"
+
+- name: reload systemd
+  systemd:
+    daemon_reload: yes
+  listen: "reload systemd"
+
+- name: restart rkhunter timer
+  systemd:
+    name: rkhunter-scan.timer
+    state: restarted
+  listen: "restart rkhunter timer"

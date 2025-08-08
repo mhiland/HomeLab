@@ -1,0 +1,23 @@
+[Unit]
+Description=Run RKhunter Security Scanner {{ rkhunter_scan_frequency }}
+Requires=rkhunter-scan.service
+
+[Timer]
+{% if rkhunter_scan_frequency == "daily" %}
+OnCalendar=daily
+RandomizedDelaySec=1800
+{% elif rkhunter_scan_frequency == "weekly" %}
+OnCalendar=weekly
+RandomizedDelaySec=3600
+{% elif rkhunter_scan_frequency == "monthly" %}
+OnCalendar=monthly
+RandomizedDelaySec=7200
+{% else %}
+# Custom frequency: {{ rkhunter_scan_frequency }}
+OnCalendar={{ rkhunter_scan_frequency }}
+RandomizedDelaySec=1800
+{% endif %}
+Persistent=true
+
+[Install]
+WantedBy=timers.target

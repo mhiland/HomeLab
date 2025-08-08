@@ -1,0 +1,25 @@
+[Unit]
+Description=RKhunter Security Scanner
+Documentation=man:rkhunter(8)
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rkhunter-scan.sh
+User=root
+Group=root
+StandardOutput=journal
+StandardError=journal
+
+# Security settings
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/rkhunter {{ rkhunter_report_dir }} /var/lock
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+RestrictSUIDSGID=true

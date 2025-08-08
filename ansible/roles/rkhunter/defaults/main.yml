@@ -1,0 +1,64 @@
+---
+# Default variables for rkhunter role
+rkhunter_report_dir: "/var/lib/rkhunter/reports"
+rkhunter_enable_timer: true
+rkhunter_scan_frequency: "daily"
+rkhunter_email_notify: false
+rkhunter_email_address: "admin@{{ ansible_domain | default('localhost') }}"
+
+# RKhunter configuration options
+rkhunter_config:
+  # Basic configuration
+  logfile: "/var/log/rkhunter/rkhunter.log"
+  append_log: 1
+  copy_log_on_error: 1
+  use_syslog: "authpriv.notice"
+  color_set2: 1
+  auto_x_detect: 1
+  
+  # Update options - Secure defaults for air-gapped environments
+  update_mirrors: 0  # Disable network updates by default for security
+  mirrors_mode: 0
+  web_cmd: ""  # Disable web command by default (comment out WEB_CMD)
+  
+  # Scanning options
+  disable_tests: "suspscan hidden_procs deleted_files packet_cap_apps apps"
+  suppress_warnings: ""
+  
+  # Hash function
+  hash_func: "SHA256"
+  hash_fld_idx: 3
+  
+  # Package manager
+  pkgmgr: "{{ 'dpkg' if ansible_os_family == 'Debian' else 'rpm' }}"
+  
+  # Mail configuration
+  mail_on_warning: "{{ rkhunter_email_notify | default(false) | ternary('root@localhost', '') }}"
+  mail_cmd: "mail -s '[rkhunter] Warning on {{ ansible_hostname }}'"
+  
+  # Directories to scan
+  scan_mode_dev: "THOROUGH"
+  phalanx2_dirtest: 0
+  
+  # Network scanning
+  allow_ssh_root_user: "yes"
+  allow_ssh_prot_v1: 0
+  
+  # System checks
+  check_mk_passwds: 1
+  check_accounts: 1
+  check_group_auth: 1
+  check_nfs: 1
+  
+  # File system checks  
+  rtkt_file_whitelist: ""
+  rtkt_dir_whitelist: ""
+  
+  # Port scanning
+  port_whitelist: "22 80 443"
+  
+  # Application checks
+  app_whitelist: ""
+  
+  # Ignore prelinked files
+  ignore_prelink_changes: 1

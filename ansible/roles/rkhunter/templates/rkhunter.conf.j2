@@ -1,0 +1,92 @@
+# RKhunter configuration file
+# Managed by Ansible - Do not edit manually
+
+# Basic configuration
+LOGFILE={{ rkhunter_config.logfile }}
+APPEND_LOG={{ rkhunter_config.append_log }}
+COPY_LOG_ON_ERROR={{ rkhunter_config.copy_log_on_error }}
+USE_SYSLOG={{ rkhunter_config.use_syslog }}
+COLOR_SET2={{ rkhunter_config.color_set2 }}
+AUTO_X_DETECT={{ rkhunter_config.auto_x_detect }}
+
+# Update configuration
+UPDATE_MIRRORS={{ rkhunter_config.update_mirrors }}
+MIRRORS_MODE={{ rkhunter_config.mirrors_mode }}
+{% if rkhunter_config.web_cmd %}
+WEB_CMD="{{ rkhunter_config.web_cmd }}"
+{% else %}
+# WEB_CMD is disabled for security (offline mode)
+{% endif %}
+
+# Scanning options
+{% if rkhunter_config.disable_tests %}
+DISABLE_TESTS="{{ rkhunter_config.disable_tests }}"
+{% endif %}
+{% if rkhunter_config.suppress_warnings %}
+SUPPRESS_WARNINGS="{{ rkhunter_config.suppress_warnings }}"
+{% endif %}
+
+# Hash function
+HASH_FUNC={{ rkhunter_config.hash_func }}
+HASH_FLD_IDX={{ rkhunter_config.hash_fld_idx }}
+
+# Package manager
+PKGMGR={{ rkhunter_config.pkgmgr }}
+
+# Mail configuration
+{% if rkhunter_config.mail_on_warning %}
+MAIL-ON-WARNING="{{ rkhunter_config.mail_on_warning }}"
+MAIL_CMD="{{ rkhunter_config.mail_cmd }}"
+{% endif %}
+
+# Directory scanning
+SCAN_MODE_DEV={{ rkhunter_config.scan_mode_dev }}
+PHALANX2_DIRTEST={{ rkhunter_config.phalanx2_dirtest }}
+
+# SSH configuration
+ALLOW_SSH_ROOT_USER={{ rkhunter_config.allow_ssh_root_user }}
+ALLOW_SSH_PROT_V1={{ rkhunter_config.allow_ssh_prot_v1 }}
+
+# System checks
+CHECK_MK={{ rkhunter_config.check_mk_passwds }}
+PWDLESS_ACCOUNTS={{ rkhunter_config.check_accounts }}
+CHECK_GROUP_ACCNT={{ rkhunter_config.check_group_auth }}
+CHECK_NFS={{ rkhunter_config.check_nfs }}
+
+# File system checks
+{% if rkhunter_config.rtkt_file_whitelist %}
+RTKT_FILE_WHITELIST="{{ rkhunter_config.rtkt_file_whitelist }}"
+{% endif %}
+{% if rkhunter_config.rtkt_dir_whitelist %}
+RTKT_DIR_WHITELIST="{{ rkhunter_config.rtkt_dir_whitelist }}"
+{% endif %}
+
+# Port whitelist
+{% if rkhunter_config.port_whitelist %}
+PORT_WHITELIST="{{ rkhunter_config.port_whitelist }}"
+{% endif %}
+
+# Application whitelist
+{% if rkhunter_config.app_whitelist %}
+APP_WHITELIST="{{ rkhunter_config.app_whitelist }}"
+{% endif %}
+
+# Prelinked files
+{% if rkhunter_config.ignore_prelink_changes %}
+IGNORE_PRELINK_CHANGES={{ rkhunter_config.ignore_prelink_changes }}
+{% endif %}
+
+# OS-specific settings for {{ ansible_os_family }}
+{% if ansible_os_family == "Debian" %}
+# Debian/Ubuntu specific settings
+PKGMGR=DPKG
+{% elif ansible_os_family == "RedHat" %}
+# RedHat/CentOS/Fedora specific settings  
+PKGMGR=RPM
+{% endif %}
+
+# Architecture-specific settings for {{ ansible_architecture }}
+{% if ansible_architecture == "aarch64" %}
+# ARM64 optimizations for Raspberry Pi
+DISABLE_TESTS="suspscan hidden_procs deleted_files packet_cap_apps"
+{% endif %}

@@ -1,0 +1,105 @@
+#!/bin/bash
+# RKhunter scan script
+# Managed by Ansible - Do not edit manually
+
+set -euo pipefail
+
+# Configuration
+REPORT_DIR="{{ rkhunter_report_dir }}"
+LOG_FILE="/var/log/rkhunter/scan-$(date +%Y%m%d_%H%M%S).log"
+REPORT_FILE="${REPORT_DIR}/rkhunter-report-$(date +%Y%m%d_%H%M%S).txt"
+LOCK_FILE="/var/lock/rkhunter-scan.lock"
+EMAIL="{{ rkhunter_email_address }}"
+HOSTNAME=$(hostname -f)
+
+# Functions
+log_message() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "${LOG_FILE}"
+}
+
+cleanup() {
+    rm -f "${LOCK_FILE}"
+}
+
+trap cleanup EXIT
+
+# Check for existing lock
+if [ -f "${LOCK_FILE}" ]; then
+    log_message "ERROR: Another rkhunter scan is already running. Exiting."
+    exit 1
+fi
+
+# Create lock file
+echo $$ > "${LOCK_FILE}"
+
+log_message "Starting RKhunter scan on ${HOSTNAME}"
+
+# Ensure directories exist
+mkdir -p "$(dirname "${LOG_FILE}")" "${REPORT_DIR}"
+
+# Update rkhunter database
+log_message "Updating RKhunter database..."
+if ! rkhunter --update --nocolors 2>&1 | tee -a "${LOG_FILE}"; then
+    log_message "WARNING: Database update failed or had warnings"
+fi
+
+# Update file properties
+log_message "Updating file properties database..."
+if ! rkhunter --propupd --nocolors 2>&1 | tee -a "${LOG_FILE}"; then
+    log_message "WARNING: Properties update failed or had warnings"
+fi
+
+# Perform the scan
+log_message "Performing RKhunter scan..."
+SCAN_EXIT_CODE=0
+rkhunter --check --nocolors --report-warnings-only --skip-keypress 2>&1 | tee "${REPORT_FILE}" || SCAN_EXIT_CODE=$?
+
+# Analyze results
+if [ ${SCAN_EXIT_CODE} -eq 0 ]; then
+    log_message "RKhunter scan completed successfully - no issues found"
+    SUBJECT="[RKhunter] Clean scan on ${HOSTNAME}"
+    PRIORITY="INFO"
+elif [ ${SCAN_EXIT_CODE} -eq 1 ]; then
+    log_message "RKhunter scan completed with warnings"
+    SUBJECT="[RKhunter] Warnings found on ${HOSTNAME}"
+    PRIORITY="WARNING"
+else
+    log_message "RKhunter scan failed with exit code ${SCAN_EXIT_CODE}"
+    SUBJECT="[RKhunter] Scan failed on ${HOSTNAME}"
+    PRIORITY="ERROR"
+fi
+
+# Generate summary
+{
+    echo "RKhunter Security Scan Report"
+    echo "=============================="
+    echo "Host: ${HOSTNAME}"
+    echo "Date: $(date)"
+    echo "Exit Code: ${SCAN_EXIT_CODE}"
+    echo "Priority: ${PRIORITY}"
+    echo ""
+    echo "Report Details:"
+    echo "---------------"
+    cat "${REPORT_FILE}"
+} > "${REPORT_FILE}.summary"
+
+# Send email notification if configured
+{% if rkhunter_email_notify %}
+if [ -n "${EMAIL}" ] && [ "${SCAN_EXIT_CODE}" -ne 0 ]; then
+    log_message "Sending email notification to ${EMAIL}"
+    if command -v mail >/dev/null 2>&1; then
+        mail -s "${SUBJECT}" "${EMAIL}" < "${REPORT_FILE}.summary" || log_message "WARNING: Failed to send email"
+    else
+        log_message "WARNING: mail command not available for notifications"
+    fi
+fi
+{% endif %}
+
+# Cleanup old reports (keep last 30 days)
+find "${REPORT_DIR}" -name "rkhunter-report-*.txt*" -type f -mtime +30 -delete 2>/dev/null || true
+find "/var/log/rkhunter" -name "scan-*.log" -type f -mtime +30 -delete 2>/dev/null || true
+
+log_message "RKhunter scan completed with exit code ${SCAN_EXIT_CODE}"
+
+# Exit with original scan exit code for monitoring
+exit ${SCAN_EXIT_CODE}

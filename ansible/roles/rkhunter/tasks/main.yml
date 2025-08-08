@@ -1,0 +1,89 @@
+---
+# rkhunter role - Rootkit Hunter installation and configuration
+- name: Update package cache
+  package:
+    update_cache: yes
+  when: ansible_os_family in ['Debian', 'RedHat']
+
+- name: Install rkhunter
+  package:
+    name: rkhunter
+    state: present
+
+- name: Create rkhunter configuration directory
+  file:
+    path: /etc/rkhunter
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Deploy rkhunter configuration
+  template:
+    src: rkhunter.conf.j2
+    dest: /etc/rkhunter.conf
+    owner: root
+    group: root
+    mode: '0644'
+    backup: yes
+  notify: update rkhunter database
+
+- name: Create rkhunter reports directory
+  file:
+    path: "{{ rkhunter_report_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Create rkhunter log directory
+  file:
+    path: /var/log/rkhunter
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Deploy rkhunter scan script
+  template:
+    src: rkhunter-scan.sh.j2
+    dest: /usr/local/bin/rkhunter-scan.sh
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Create systemd service for rkhunter scanning
+  template:
+    src: rkhunter-scan.service.j2
+    dest: /etc/systemd/system/rkhunter-scan.service
+    owner: root
+    group: root
+    mode: '0644'
+  notify: reload systemd
+
+- name: Create systemd timer for rkhunter scanning
+  template:
+    src: rkhunter-scan.timer.j2
+    dest: /etc/systemd/system/rkhunter-scan.timer
+    owner: root
+    group: root
+    mode: '0644'
+  notify: reload systemd
+
+- name: Enable and start rkhunter scan timer
+  systemd:
+    name: rkhunter-scan.timer
+    enabled: yes
+    state: started
+    daemon_reload: yes
+  when: rkhunter_enable_timer | default(true)
+
+- name: Initial rkhunter database update
+  command: rkhunter --update
+  changed_when: false
+  failed_when: false
+
+- name: Initial rkhunter properties update
+  command: rkhunter --propupd
+  changed_when: false
+  failed_when: false

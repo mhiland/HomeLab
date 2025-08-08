@@ -1,0 +1,120 @@
+# AIDE configuration for {{ ansible_hostname }}
+# Advanced Intrusion Detection Environment
+# This configuration focuses on critical system directories and files
+
+# Database paths
+database_in=file:/var/lib/aide/aide.db
+database_out=file:/var/lib/aide/aide.db.new
+database_new=file:/var/lib/aide/aide.db.new
+gzip_dbout=yes
+
+# Report settings
+report_summarize_changes=yes
+report_grouped=yes
+
+# Define file attributes to check
+# p = permissions, i = inode, n = number of links, u = user, g = group
+# s = size, m = mtime, c = ctime, md5 = MD5 checksum, sha256 = SHA256 checksum
+
+# Define rule groups
+FIPSR = p+i+n+u+g+s+m+c+md5+sha256
+NORMAL = FIPSR+sha512
+DIR = p+i+n+u+g
+PERMS = p+u+g
+STATIC = p+u+g+i+n+s+m+c+md5+sha256
+
+# Critical system directories and files
+/boot NORMAL
+/bin NORMAL
+/sbin NORMAL
+/lib NORMAL
+/lib64 NORMAL
+/usr/bin NORMAL
+/usr/sbin NORMAL
+/usr/lib NORMAL
+/usr/lib64 NORMAL
+/usr/local/bin NORMAL
+/usr/local/sbin NORMAL
+
+# System configuration files
+/etc PERMS
+!/etc/mtab
+!/etc/.*~
+!/etc/exports
+!/etc/fstab
+!/etc/passwd-
+!/etc/group-
+!/etc/shadow-
+!/etc/gshadow-
+!/etc/security/opasswd
+!/etc/resolv.conf
+!/etc/ntp.drift
+!/etc/localtime
+!/etc/ioctl.save
+!/etc/passwd.OLD
+!/etc/group.OLD
+!/etc/shadow.OLD
+!/etc/gshadow.OLD
+!/etc/aide/.*
+!/etc/prelink.cache
+!/etc/crontab
+!/etc/mtab
+!/etc/.fstab
+
+# Root directory structure
+/root NORMAL
+
+# Critical system files
+/var/log PERMS
+!/var/log/.*
+!/var/log/lastlog
+!/var/log/wtmp
+!/var/log/btmp
+!/var/log/utmp
+!/var/log/faillog
+!/var/log/auth.log.*
+!/var/log/syslog.*
+!/var/log/daemon.log.*
+!/var/log/kern.log.*
+!/var/log/messages.*
+!/var/log/maillog.*
+!/var/log/secure.*
+!/var/log/cron.*
+!/var/log/aide/.*
+
+# Exclude commonly changing directories and special filesystems
+!/proc
+!/sys
+!/dev
+!/run
+!/tmp
+!/var/tmp
+!/var/cache
+!/var/spool
+!/var/run
+!/var/lock
+!/var/lib/dhcp
+!/var/lib/dhcpcd
+!/var/lib/NetworkManager
+!/var/lib/systemd
+!/var/lib/plymouth
+!/var/lib/lightdm
+!/var/lib/gdm
+!/var/lib/aide/aide.db
+!/var/lib/aide/aide.db.new
+!/var/lib/rkhunter
+!/var/lib/chkrootkit
+!/var/lib/apt
+!/var/lib/dpkg/.*-old
+!/var/lib/dpkg/status-old
+!/lost+found
+!/home/.*
+!/media
+!/mnt
+!/opt/vc
+!/var/ossec
+!/usr/share/man/.*
+!/usr/share/doc/.*
+
+# Exclude log files that change frequently
+!/var/log

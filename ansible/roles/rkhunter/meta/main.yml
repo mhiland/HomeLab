@@ -1,0 +1,33 @@
+---
+galaxy_info:
+  author: HomeLab Security Team
+  description: RKhunter installation and configuration for automated rootkit detection
+  license: MIT
+  min_ansible_version: 2.9
+  platforms:
+    - name: Ubuntu
+      versions:
+        - focal
+        - jammy
+        - noble
+    - name: Debian
+      versions:
+        - bullseye
+        - bookworm
+    - name: Fedora
+      versions:
+        - 38
+        - 39
+        - 40
+    - name: CentOS
+      versions:
+        - 8
+        - 9
+
+dependencies: []
+
+galaxy_tags:
+  - security
+  - rootkit
+  - scanning
+  - monitoring

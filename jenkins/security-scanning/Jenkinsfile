@@ -1,0 +1,421 @@
+#!/usr/bin/env groovy
+/**
+ * HomeLab Security Scanning Pipeline
+ * 
+ * This pipeline orchestrates comprehensive security scanning across all HomeLab hosts
+ * using Ansible-deployed security tools including rkhunter, chkrootkit, AIDE, and debsums.
+ * 
+ * Designed for nightly execution with comprehensive reporting and alerting.
+ */
+
+pipeline {
+    agent any
+    
+    parameters {
+        choice(
+            name: 'SCAN_TYPE',
+            choices: ['full', 'quick', 'rootkit-only', 'integrity-only'],
+            description: 'Type of security scan to perform'
+        )
+        choice(
+            name: 'TARGET_ENVIRONMENT', 
+            choices: ['all', 'production', 'development', 'raspberry-pi'],
+            description: 'Target environment for scanning'
+        )
+        booleanParam(
+            name: 'FORCE_UPDATE_DATABASES',
+            defaultValue: false,
+            description: 'Force update of security tool databases before scanning'
+        )
+        booleanParam(
+            name: 'SEND_EMAIL_REPORT',
+            defaultValue: true,
+            description: 'Send email report after completion'
+        )
+    }
+    
+    environment {
+        // Ansible configuration
+        ANSIBLE_CONFIG = "${WORKSPACE}/ansible/ansible.cfg"
+        ANSIBLE_INVENTORY = "${WORKSPACE}/ansible/inventories/homelab"
+        
+        // Security scanning configuration
+        SCAN_TIMESTAMP = sh(script: 'date +%Y%m%d_%H%M%S', returnStdout: true).trim()
+        REPORT_DIR = "${WORKSPACE}/security-reports/${SCAN_TIMESTAMP}"
+        
+        // Notification configuration
+        EMAIL_RECIPIENTS = credentials('security-team-email')
+        SLACK_CHANNEL = '#security-alerts'
+        
+        // Parallel execution limits
+        MAX_PARALLEL_HOSTS = '4'
+    }
+    
+    triggers {
+        // Nightly security scan at 2 AM
+        cron('H 2 * * *')
+    }
+    
+    options {
+        timestamps()
+        timeout(time: 4, unit: 'HOURS')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(
+            numToKeepStr: '30',
+            artifactNumToKeepStr: '10'
+        ))
+    }
+    
+    stages {
+        stage('Initialization') {
+            steps {
+                script {
+                    echo "🔍 Starting HomeLab Security Scanning Pipeline"
+                    echo "📅 Timestamp: ${SCAN_TIMESTAMP}"
+                    echo "🎯 Scan Type: ${params.SCAN_TYPE}"
+                    echo "🌐 Target Environment: ${params.TARGET_ENVIRONMENT}"
+                    
+                    // Create report directories
+                    sh """
+                        mkdir -p ${REPORT_DIR}/{raw-reports,processed-reports,dashboards}
+                        mkdir -p ${REPORT_DIR}/logs
+                    """
+                    
+                    // Set up environment-specific inventory
+                    env.TARGET_HOSTS = getTargetHosts(params.TARGET_ENVIRONMENT)
+                }
+                
+                // Validate Ansible connectivity
+                sh """
+                    cd ${WORKSPACE}/ansible
+                    ansible ${env.TARGET_HOSTS} -m ping --timeout=30
+                """
+            }
+        }
+        
+        stage('Pre-scan Setup') {
+            parallel {
+                stage('Update Security Databases') {
+                    when {
+                        anyOf {
+                            params.FORCE_UPDATE_DATABASES
+                            triggeredBy 'TimerTrigger'
+                        }
+                    }
+                    steps {
+                        sh """
+                            cd ${WORKSPACE}/ansible
+                            ansible-playbook playbooks/security_database_update.yml \\
+                                -i ${ANSIBLE_INVENTORY} \\
+                                --limit ${env.TARGET_HOSTS} \\
+                                --extra-vars "report_dir=${REPORT_DIR}"
+                        """
+                    }
+                }
+                
+                stage('Deploy Security Tools') {
+                    steps {
+                        sh """
+                            cd ${WORKSPACE}/ansible
+                            ansible-playbook playbooks/deploy_security_monitoring.yml \\
+                                -i ${ANSIBLE_INVENTORY} \\
+                                --limit ${env.TARGET_HOSTS} \\
+                                --extra-vars "report_dir=${REPORT_DIR}"
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Security Scanning') {
+            parallel {
+                stage('Rootkit Detection') {
+                    when {
+                        anyOf {
+                            equals expected: 'full', actual: params.SCAN_TYPE
+                            equals expected: 'rootkit-only', actual: params.SCAN_TYPE
+                        }
+                    }
+                    steps {
+                        script {
+                            def rootkitStages = [:]
+                            
+                            // RKhunter scanning
+                            rootkitStages['RKhunter Scan'] = {
+                                sh """
+                                    cd ${WORKSPACE}/ansible
+                                    ansible-playbook playbooks/security_scan_rkhunter.yml \\
+                                        -i ${ANSIBLE_INVENTORY} \\
+                                        --limit ${env.TARGET_HOSTS} \\
+                                        --extra-vars "report_dir=${REPORT_DIR}/raw-reports/rkhunter"
+                                """
+                            }
+                            
+                            // Chkrootkit scanning
+                            rootkitStages['Chkrootkit Scan'] = {
+                                sh """
+                                    cd ${WORKSPACE}/ansible
+                                    ansible-playbook playbooks/security_scan_chkrootkit.yml \\
+                                        -i ${ANSIBLE_INVENTORY} \\
+                                        --limit ${env.TARGET_HOSTS} \\
+                                        --extra-vars "report_dir=${REPORT_DIR}/raw-reports/chkrootkit"
+                                """
+                            }
+                            
+                            parallel rootkitStages
+                        }
+                    }
+                }
+                
+                stage('File Integrity Monitoring') {
+                    when {
+                        anyOf {
+                            equals expected: 'full', actual: params.SCAN_TYPE
+                            equals expected: 'integrity-only', actual: params.SCAN_TYPE
+                        }
+                    }
+                    steps {
+                        script {
+                            def integrityStages = [:]
+                            
+                            // AIDE scanning
+                            integrityStages['AIDE Check'] = {
+                                sh """
+                                    cd ${WORKSPACE}/ansible
+                                    ansible-playbook playbooks/security_scan_aide.yml \\
+                                        -i ${ANSIBLE_INVENTORY} \\
+                                        --limit ${env.TARGET_HOSTS} \\
+                                        --extra-vars "report_dir=${REPORT_DIR}/raw-reports/aide"
+                                """
+                            }
+                            
+                            // Package integrity verification
+                            integrityStages['Package Verification'] = {
+                                sh """
+                                    cd ${WORKSPACE}/ansible
+                                    ansible-playbook playbooks/security_scan_debsums.yml \\
+                                        -i ${ANSIBLE_INVENTORY} \\
+                                        --limit ${env.TARGET_HOSTS} \\
+                                        --extra-vars "report_dir=${REPORT_DIR}/raw-reports/debsums"
+                                """
+                            }
+                            
+                            parallel integrityStages
+                        }
+                    }
+                }
+                
+                stage('System Security Assessment') {
+                    when {
+                        equals expected: 'full', actual: params.SCAN_TYPE
+                    }
+                    steps {
+                        sh """
+                            cd ${WORKSPACE}/ansible
+                            ansible-playbook playbooks/security_system_assessment.yml \\
+                                -i ${ANSIBLE_INVENTORY} \\
+                                --limit ${env.TARGET_HOSTS} \\
+                                --extra-vars "report_dir=${REPORT_DIR}/raw-reports/system"
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Report Processing') {
+            steps {
+                script {
+                    // Process and aggregate security scan results
+                    sh """
+                        cd ${WORKSPACE}/ansible
+                        ansible-playbook playbooks/security_report_processing.yml \\
+                            -i ${ANSIBLE_INVENTORY} \\
+                            --limit localhost \\
+                            --extra-vars "raw_reports_dir=${REPORT_DIR}/raw-reports processed_reports_dir=${REPORT_DIR}/processed-reports"
+                    """
+                    
+                    // Generate security dashboard
+                    sh """
+                        python3 ${WORKSPACE}/jenkins/security-scanning/scripts/generate_security_dashboard.py \\
+                            --input-dir ${REPORT_DIR}/processed-reports \\
+                            --output-dir ${REPORT_DIR}/dashboards \\
+                            --timestamp ${SCAN_TIMESTAMP}
+                    """
+                    
+                    // Archive scan results
+                    archiveArtifacts artifacts: "security-reports/${SCAN_TIMESTAMP}/**/*", fingerprint: true
+                }
+            }
+        }
+        
+        stage('Security Analysis') {
+            steps {
+                script {
+                    // Analyze security findings and determine severity
+                    def analysisResult = sh(
+                        script: """
+                            python3 ${WORKSPACE}/jenkins/security-scanning/scripts/analyze_security_findings.py \\
+                                --reports-dir ${REPORT_DIR}/processed-reports \\
+                                --output-file ${REPORT_DIR}/security-analysis.json
+                        """,
+                        returnStatus: true
+                    )
+                    
+                    // Store analysis results for notification logic
+                    env.SECURITY_ANALYSIS_EXIT_CODE = analysisResult.toString()
+                    
+                    // Read analysis summary
+                    def analysisData = readJSON file: "${REPORT_DIR}/security-analysis.json"
+                    env.CRITICAL_FINDINGS = analysisData.critical_count.toString()
+                    env.HIGH_FINDINGS = analysisData.high_count.toString()
+                    env.MEDIUM_FINDINGS = analysisData.medium_count.toString()
+                    env.LOW_FINDINGS = analysisData.low_count.toString()
+                }
+            }
+        }
+        
+        stage('Alerting and Notification') {
+            parallel {
+                stage('Email Notification') {
+                    when {
+                        params.SEND_EMAIL_REPORT
+                    }
+                    steps {
+                        script {
+                            def severity = getSeverityLevel(env.CRITICAL_FINDINGS, env.HIGH_FINDINGS)
+                            def subject = getEmailSubject(severity, env.SCAN_TIMESTAMP)
+                            
+                            emailext(
+                                to: "${EMAIL_RECIPIENTS}",
+                                subject: subject,
+                                body: '''${SCRIPT, template="security-scan-email.template"}''',
+                                attachmentsPattern: "security-reports/${SCAN_TIMESTAMP}/dashboards/security-dashboard.html",
+                                mimeType: 'text/html'
+                            )
+                        }
+                    }
+                }
+                
+                stage('Slack Notification') {
+                    when {
+                        anyOf {
+                            expression { env.CRITICAL_FINDINGS.toInteger() > 0 }
+                            expression { env.HIGH_FINDINGS.toInteger() > 0 }
+                        }
+                    }
+                    steps {
+                        script {
+                            def message = buildSlackMessage(
+                                env.CRITICAL_FINDINGS, 
+                                env.HIGH_FINDINGS, 
+                                env.MEDIUM_FINDINGS, 
+                                env.LOW_FINDINGS,
+                                env.BUILD_URL
+                            )
+                            
+                            slackSend(
+                                channel: env.SLACK_CHANNEL,
+                                color: getSeverityColor(env.CRITICAL_FINDINGS, env.HIGH_FINDINGS),
+                                message: message
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            script {
+                // Cleanup temporary files
+                sh """
+                    find ${WORKSPACE}/security-reports -name "*.tmp" -delete || true
+                    find ${WORKSPACE}/security-reports -type d -empty -delete || true
+                """
+                
+                // Update scan statistics
+                sh """
+                    echo "{\\"timestamp\\": \\"${SCAN_TIMESTAMP}\\", \\"scan_type\\": \\"${params.SCAN_TYPE}\\", \\"environment\\": \\"${params.TARGET_ENVIRONMENT}\\", \\"duration\\": \\"${currentBuild.duration}\\", \\"status\\": \\"${currentBuild.result}\\"}" >> ${WORKSPACE}/security-scan-history.jsonl
+                """
+            }
+        }
+        
+        failure {
+            emailext(
+                to: "${EMAIL_RECIPIENTS}",
+                subject: "🚨 HomeLab Security Scan FAILED - ${SCAN_TIMESTAMP}",
+                body: '''
+                    <h2>Security Scanning Pipeline Failed</h2>
+                    <p><strong>Build:</strong> ${BUILD_URL}</p>
+                    <p><strong>Timestamp:</strong> ${SCAN_TIMESTAMP}</p>
+                    <p><strong>Scan Type:</strong> ${SCAN_TYPE}</p>
+                    <p><strong>Environment:</strong> ${TARGET_ENVIRONMENT}</p>
+                    
+                    <h3>Failure Details</h3>
+                    <pre>${BUILD_LOG, maxLines=50}</pre>
+                    
+                    <p>Please investigate and resolve the issue.</p>
+                ''',
+                mimeType: 'text/html'
+            )
+        }
+        
+        success {
+            script {
+                if (env.CRITICAL_FINDINGS.toInteger() == 0 && env.HIGH_FINDINGS.toInteger() == 0) {
+                    echo "✅ Security scan completed successfully with no critical or high-priority findings"
+                } else {
+                    echo "⚠️ Security scan completed with findings that require attention"
+                }
+            }
+        }
+    }
+}
+
+// Helper functions
+def getTargetHosts(environment) {
+    switch(environment) {
+        case 'production':
+            return 'production'
+        case 'development':
+            return 'development'
+        case 'raspberry-pi':
+            return 'raspberry_pi'
+        case 'all':
+        default:
+            return 'all'
+    }
+}
+
+def getSeverityLevel(critical, high) {
+    if (critical.toInteger() > 0) return 'CRITICAL'
+    if (high.toInteger() > 0) return 'HIGH'
+    return 'INFO'
+}
+
+def getEmailSubject(severity, timestamp) {
+    def emoji = severity == 'CRITICAL' ? '🚨' : (severity == 'HIGH' ? '⚠️' : '✅')
+    return "${emoji} HomeLab Security Scan Report - ${severity} - ${timestamp}"
+}
+
+def getSeverityColor(critical, high) {
+    if (critical.toInteger() > 0) return 'danger'
+    if (high.toInteger() > 0) return 'warning'
+    return 'good'
+}
+
+def buildSlackMessage(critical, high, medium, low, buildUrl) {
+    return """
+🔍 *HomeLab Security Scan Complete*
+
+📊 *Findings Summary:*
+• 🚨 Critical: ${critical}
+• ⚠️ High: ${high}
+• 🔸 Medium: ${medium}
+• ℹ️ Low: ${low}
+
+🔗 *Build:* <${buildUrl}|View Details>
+📅 *Timestamp:* ${SCAN_TIMESTAMP}
+"""
+}
