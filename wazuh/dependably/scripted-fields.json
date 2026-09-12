@@ -1,0 +1,8 @@
+[
+  {"name": "dep_critical", "source": "critical"},
+  {"name": "dep_high",     "source": "high"},
+  {"name": "dep_medium",   "source": "medium"},
+  {"name": "dep_low",      "source": "low"},
+  {"name": "dep_affected", "source": "packages_affected"},
+  {"name": "dep_total",    "source": "packages_total"}
+]

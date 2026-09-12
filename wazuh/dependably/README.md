@@ -70,7 +70,22 @@ pull API. Pull wins here on every axis that matters:
    confirm with Server management, Rules, filter `Custom rules`.
 
 5. **Dashboard.** Dashboards Management, Saved objects, Import `dependably-dashboard.ndjson`.
-   Opens at Dashboards, "Dependably Registry".
+   Opens at Dashboards, "Dependably Registry". The importer **regenerates object ids**, so a
+   second import creates a duplicate dashboard rather than replacing the first - delete the
+   old one.
+
+   Then refresh the `wazuh-alerts-*` field list and add the scripted fields the vulnerability
+   panels aggregate over (`install-scripted-fields.js`). Wazuh's JSON decoder stringifies
+   every value, so `packages_affected` and the severity counts arrive as keywords that
+   `max()` cannot touch; `dep_critical` and friends parse them back to numbers.
+
+   Each scripted field must begin with `doc.containsKey(...)`. Indices written before this
+   feed existed carry no mapping for the field, and `doc['missing.field']` **throws** - one
+   `script_exception` shard failure per old index, which OpenSearch surfaces as a partial
+   result ("1 of 24 shards failed"), not an error. `f.size() == 0` does not cover this: it
+   guards a field that exists and is empty, which is a different condition. Verify over the
+   whole index set with no time filter, since a dashboard-sized window only touches today's
+   index and will look clean while older shards fail.
 
 6. **Replay history into the new feed.** `wazuh-logcollector` seeks to the end of a file it
    has not seen before, so everything written before step 3 is never read. Re-emit it:
