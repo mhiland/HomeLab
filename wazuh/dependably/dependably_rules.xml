@@ -31,13 +31,31 @@
        source_ip is the Docker bridge gateway. So these rules can count failures but
        cannot attribute them to a user or an address. Tracked as G1/G3 on issue #668. -->
 
+  <!-- Only a LIVE failure feeds the frequency window below. Wazuh correlates on ingest time,
+       so a backfill (the first run replays up to 24h, and the replay flag up to 90 days) would land
+       months of scattered failures in one second and trip a brute-force alert on traffic that
+       never happened. The poller decides live vs history, because a rule cannot compare
+       event_time to now. This was not theoretical: the first PoC run produced four such false
+       positives whose own event_time values were days apart. -->
   <rule id="100110" level="5">
     <if_sid>100101</if_sid>
     <field name="dependably.action" type="pcre2">^login\.failure$</field>
+    <field name="dependably.live" type="pcre2">^true$</field>
     <description>Dependably: failed login ($(dependably.detail_reason)).</description>
     <group>authentication_failed,dependably_auth_fail,</group>
   </rule>
 
+  <!-- Backfilled failure. Indexed so the history is searchable, but deliberately carries no
+       correlation group, so it can never contribute to a time-window rule. -->
+  <rule id="100115" level="3">
+    <if_sid>100101</if_sid>
+    <field name="dependably.action" type="pcre2">^login\.failure$</field>
+    <field name="dependably.live" type="pcre2">^false$</field>
+    <description>Dependably: failed login, backfilled history ($(dependably.detail_reason)).</description>
+    <group>dependably_history,</group>
+  </rule>
+
+  <!-- 8 live failures inside 120s. Only rule 100110 (live) feeds this; 100115 cannot. -->
   <rule id="100111" level="10" frequency="8" timeframe="120">
     <if_matched_sid>100110</if_matched_sid>
     <description>Dependably: repeated failed logins - possible brute force or password spray.</description>
@@ -47,8 +65,19 @@
   <rule id="100112" level="3">
     <if_sid>100101</if_sid>
     <field name="dependably.action" type="pcre2">^login\.success$</field>
+    <field name="dependably.live" type="pcre2">^true$</field>
     <description>Dependably: login by $(dependably.actor_id) via $(dependably.detail_method).</description>
     <group>authentication_success,</group>
+  </rule>
+
+  <!-- Backfilled success: no authentication_success group, so it cannot pair with a failure
+       burst in rule 100113. -->
+  <rule id="100116" level="3">
+    <if_sid>100101</if_sid>
+    <field name="dependably.action" type="pcre2">^login\.success$</field>
+    <field name="dependably.live" type="pcre2">^false$</field>
+    <description>Dependably: login, backfilled history - $(dependably.actor_id).</description>
+    <group>dependably_history,</group>
   </rule>
 
   <rule id="100113" level="12" timeframe="300">

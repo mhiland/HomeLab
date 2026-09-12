@@ -169,6 +169,30 @@ Two things that look like this failure but are not:
 - **Wildcard `<location>` works fine.** So does appending a separate `<ossec_config>` block.
   Both were suspected here and both were wrong.
 
+## Backfilled events must never drive time-window rules
+
+Wazuh correlates on **ingest** time, not on the event's own timestamp. A backfill therefore
+lands months of scattered events in a single second and manufactures correlations that never
+happened. The first PoC run produced four "repeated failed logins - possible brute force"
+alerts whose underlying events were days apart; a first install would do the same, because the
+default first run backfills 24 hours.
+
+The poller stamps every record with `dependably.live` - true when the event was less than
+`LIVE_WINDOW_SECONDS` (300) old at collection time. The rule pairs split on it:
+
+| | live | backfilled |
+|---|---|---|
+| `login.failure` | 100110, level 5, feeds the frequency window | 100115, level 3, **no correlation group** |
+| `login.success` | 100112, level 3, `authentication_success` | 100116, level 3, **no correlation group** |
+
+The decision is made in the poller because a Wazuh rule cannot compare `event_time` to now.
+
+Verify both directions after any change here - a one-sided test proves nothing, since a rule
+that never fires also passes the negative case:
+
+    12 backfilled failures -> 100115 x12, and 100111 must NOT appear
+    12 live failures       -> 100110, with 100111 firing on the 8th
+
 ## Expect up to two minutes of latency
 
 A new event is not visible on the dashboard immediately, and that is normal. Two 60-second

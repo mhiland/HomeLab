@@ -47,6 +47,12 @@ PAGE_LIMIT = 500                    # server clamps to 500
 MAX_PAGES = 40                      # 20k events per run; a cursor loop cannot run away
 RECENT_IDS_KEPT = 2000              # de-dupe ring, see DEDUPE below
 VULN_POLL_SECONDS = 15 * 60
+# An event older than this at collection time is history, not something happening now. Wazuh
+# correlates on INGEST time, so backfilled events would otherwise fabricate bursts: a 24h first
+# run replays a day of scattered failures into one second and trips the brute-force rule on
+# activity that never happened. Every record carries dependably.live, and only live ones feed
+# the time-window rules.
+LIVE_WINDOW_SECONDS = 300
 HTTP_TIMEOUT = 30
 BACKFILL_HOURS = int(os.environ.get("DEPENDABLY_SIEM_BACKFILL_HOURS", "24"))
 
@@ -182,6 +188,17 @@ def shape_event(item, instance):
         "purl": item.get("purl"),
         "source_ip": item.get("sourceIp"),
     }
+
+    # live vs history, decided here because a Wazuh rule cannot compare event_time to now.
+    created = item.get("createdAt")
+    dep["live"] = "false"
+    if created:
+        try:
+            age = (datetime.now(timezone.utc)
+                   - datetime.fromisoformat(created.replace("Z", "+00:00"))).total_seconds()
+            dep["live"] = "true" if age <= LIVE_WINDOW_SECONDS else "false"
+        except ValueError:
+            pass
 
     raw = item.get("detail")
     detail = {}
