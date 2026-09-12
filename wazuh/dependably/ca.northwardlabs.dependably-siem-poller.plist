@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ca.northwardlabs.dependably-siem-poller</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/michael/Projects/HomeLab/wazuh/dependably/dependably-siem-poller.py</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>60</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>Nice</key>
+  <integer>10</integer>
+  <key>StandardErrorPath</key>
+  <string>/Users/michael/Library/Logs/dependably-siem-poller.err</string>
+</dict>
+</plist>

@@ -1,0 +1,17 @@
+<!-- Dependably audit feed for the Mac Studio agent.
+     install-agent-config.sh installs this stanza into /Library/Ossec/etc/ossec.conf.
+     This file is the canonical copy. -->
+<ossec_config>
+
+  <!-- One JSON object per line, written by dependably-siem-poller.py under launchd.
+       Wazuh's JSON decoder flattens each object into dependably.* fields, which is what
+       dependably_rules.xml 100100-100199 match on - no custom decoder needed.
+       Path is outside any user home: logcollector runs as root, and pointing a system daemon
+       into a user's ~/Library is fragile on macOS. Literal filename rather than a glob so the
+       rotated audit.log.1 stays out of the feed (a glob would work too). -->
+  <localfile>
+    <log_format>json</log_format>
+    <location>/usr/local/var/log/dependably-siem/audit.log</location>
+  </localfile>
+
+</ossec_config>

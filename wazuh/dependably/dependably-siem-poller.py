@@ -1,0 +1,355 @@
+#!/usr/bin/python3
+"""Pulls the dependably audit feed into a JSON log file the Wazuh macOS agent tails.
+
+Runs from launchd once a minute; no persistent process. Stdlib only, and pinned to
+/usr/bin/python3 (the Command Line Tools interpreter) for the same reason the Docker
+listener is — that is the interpreter launchd's clean PATH resolves at boot.
+
+Each run pulls the window (watermark, now] from GET /api/v1/siem/events/auth, follows
+next_cursor to exhaustion, and appends one JSON object per line to the output log. The
+watermark advances only after a fully successful drain, so a failed poll re-reads its
+window on the next run instead of leaving a hole nobody can see.
+
+Every 15 minutes it also snapshots GET /api/v1/siem/vulnerabilities/summary as a single
+synthetic record, which gives the dashboard a vulnerability-posture time series.
+
+A poll that fails emits a poller_error record. A collector that has stopped collecting
+has to be visible in the SIEM; silence is indistinguishable from "nothing happened".
+"""
+
+import json
+import os
+import ssl
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timedelta, timezone
+
+HOME = os.path.expanduser("~")
+INSTANCE = os.environ.get("DEPENDABLY_SIEM_URL", "https://dependably.northwardlabs.ca")
+TOKEN_FILE = os.environ.get(
+    "DEPENDABLY_SIEM_TOKEN_FILE",
+    os.path.join(HOME, "Library/Application Support/dependably-siem-poller/token"),
+)
+STATE_DIR = os.path.join(HOME, "Library/Application Support/dependably-siem-poller")
+STATE_FILE = os.path.join(STATE_DIR, "state.json")
+# Deliberately NOT under ~/Library: wazuh-logcollector runs as root, and pointing a system
+# daemon at a path inside a user's home is fragile on macOS (it depends on the user being
+# logged in, and on whatever TCC decides about ~/Library in the next OS release).
+OUT_DIR = os.environ.get("DEPENDABLY_SIEM_LOG_DIR", "/usr/local/var/log/dependably-siem")
+OUT_FILE = os.path.join(OUT_DIR, "audit.log")
+SELF_LOG = os.path.join(HOME, "Library/Logs/dependably-siem-poller.log")
+
+MAX_BYTES = 20 * 1024 * 1024        # rotate the output past this size, one .1 kept
+PAGE_LIMIT = 500                    # server clamps to 500
+MAX_PAGES = 40                      # 20k events per run; a cursor loop cannot run away
+RECENT_IDS_KEPT = 2000              # de-dupe ring, see DEDUPE below
+VULN_POLL_SECONDS = 15 * 60
+HTTP_TIMEOUT = 30
+BACKFILL_HOURS = int(os.environ.get("DEPENDABLY_SIEM_BACKFILL_HOURS", "24"))
+
+# The server's default prefix set is login./lockout./token./rbac. only, which drops every
+# package.*, tenant.*, user.* and auth.saml.* event on the floor. There is no wildcard
+# spelling (an empty action= becomes the pattern ".%" and matches nothing), so the
+# vocabulary has to be named here. Anything dependably adds later is invisible until it
+# is added to this list -- that is a product gap, tracked as G4 on the PoC issue.
+ACTION_PREFIXES = [
+    "login", "lockout", "token", "rbac", "user", "auth", "saml",
+    "package", "proxy", "block", "vuln", "tenant", "org", "upstream",
+    "system_admin", "webhook", "threatfeed", "policy", "license", "claim",
+    "banner", "index", "metadata",
+]
+
+# Detail keys lifted to stable first-class fields so rules can match on a fixed name.
+# Deliberately a closed allowlist: `detail` is free-form per action, and letting it
+# expand straight into the index means an unbounded field count in wazuh-alerts-*.
+# Everything not listed survives verbatim in detail_raw.
+DETAIL_KEYS = (
+    "method", "prior_artifact_hash", "artifact_hash", "override_value", "origin",
+    "purl_name", "setting", "reason", "realm", "role", "outcome", "ecosystem",
+    "email", "target_user", "capabilities", "status", "provider",
+    # tenant.setting.change carries the security posture that actually moved.
+    "key", "prior_value", "new_value",
+)
+
+
+def log(msg):
+    line = "%s %s\n" % (datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"), msg)
+    try:
+        with open(SELF_LOG, "a") as fh:
+            fh.write(line)
+    except OSError:
+        sys.stderr.write(line)
+
+
+def iso(dt):
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.") + \
+        "%03dZ" % (dt.microsecond // 1000)
+
+
+def read_token():
+    with open(TOKEN_FILE) as fh:
+        return fh.read().strip()
+
+
+def load_state():
+    try:
+        with open(STATE_FILE) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(state):
+    os.makedirs(STATE_DIR, mode=0o700, exist_ok=True)
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(state, fh)
+    os.replace(tmp, STATE_FILE)
+
+
+def rotate_if_needed():
+    try:
+        if os.path.getsize(OUT_FILE) > MAX_BYTES:
+            os.replace(OUT_FILE, OUT_FILE + ".1")
+    except OSError:
+        pass
+
+
+def emit(records):
+    if not records:
+        return
+    os.makedirs(OUT_DIR, exist_ok=True)
+    rotate_if_needed()
+    with open(OUT_FILE, "a") as fh:
+        for rec in records:
+            fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
+
+
+def get_json(path, params, token):
+    url = INSTANCE.rstrip("/") + path
+    if params:
+        url += "?" + urllib.parse.urlencode(params, doseq=True)
+    req = urllib.request.Request(url, headers={
+        "Authorization": "Bearer " + token,
+        "Accept": "application/json",
+        "User-Agent": "dependably-siem-poller/1.0 (wazuh)",
+    })
+    ctx = ssl.create_default_context()
+    with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT, context=ctx) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def error_record(stage, message):
+    return {
+        "timestamp": iso(datetime.now(timezone.utc)),
+        "dependably": {
+            "instance": urllib.parse.urlsplit(INSTANCE).netloc,
+            "record_type": "poller_error",
+            "stage": stage,
+            "message": str(message)[:500],
+        },
+    }
+
+
+def shape_event(item, instance):
+    """Turns one AuditEntry into the record Wazuh indexes."""
+    action = item.get("action") or "unknown"
+    dep = {
+        "instance": instance,
+        "record_type": "audit",
+        "event_id": item.get("id"),
+        "event_time": item.get("createdAt"),
+        "action": action,
+        # First segment, so a rule can match a whole family without a regex.
+        "action_category": action.split(".", 1)[0],
+        "scope": item.get("scope"),
+        "org_id": item.get("orgId"),
+        "org_slug": item.get("orgSlug"),
+        "actor_id": item.get("actorId"),
+        "actor_email": item.get("actorEmail"),
+        "ecosystem": item.get("ecosystem"),
+        "purl": item.get("purl"),
+        "source_ip": item.get("sourceIp"),
+    }
+
+    raw = item.get("detail")
+    detail = {}
+    if raw:
+        dep["detail_raw"] = raw if isinstance(raw, str) else json.dumps(raw)
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(parsed, dict):
+                detail = parsed
+        except ValueError:
+            pass
+    for key in DETAIL_KEYS:
+        if key in detail and detail[key] is not None:
+            dep["detail_" + key] = str(detail[key])
+
+    # Wazuh rules cannot compare one field against another, so the comparison that makes
+    # package.replace interesting -- did the bytes actually change? -- is decided here and
+    # published as a plain field the rule can match.
+    if action == "package.replace":
+        prior = detail.get("prior_artifact_hash")
+        current = detail.get("artifact_hash")
+        if prior and current:
+            dep["artifact_hash_changed"] = "true" if prior != current else "false"
+
+    return {
+        "timestamp": item.get("createdAt"),
+        "dependably": {k: v for k, v in dep.items() if v is not None},
+    }
+
+
+def poll_events(token, state, instance):
+    """Returns (records, new_watermark) or raises. Watermark is only the caller's to commit."""
+    now = datetime.now(timezone.utc)
+    watermark = state.get("watermark")
+    if not watermark:
+        watermark = iso(now - timedelta(hours=BACKFILL_HOURS))
+        log("no watermark; backfilling %d hours from %s" % (BACKFILL_HOURS, watermark))
+    until = iso(now)
+
+    seen = set(state.get("recent_ids", []))
+    records, fresh_ids = [], []
+    cursor, pages = None, 0
+
+    while pages < MAX_PAGES:
+        params = {
+            "since": watermark,
+            "until": until,
+            "limit": PAGE_LIMIT,
+            "action": ACTION_PREFIXES,
+        }
+        if cursor:
+            params["cursor"] = cursor
+        body = get_json("/api/v1/siem/events/auth", params, token)
+        items = body.get("items") or []
+        for item in items:
+            eid = item.get("id")
+            # DEDUPE: ListAuthEventsAsync closes the window on both ends (>= / <=), so an
+            # event landing on exactly the millisecond we pass as `until` comes back again
+            # next run when that same instant is the `since`. The ring is sized well above
+            # one run's realistic volume.
+            if eid and eid in seen:
+                continue
+            if eid:
+                seen.add(eid)
+                fresh_ids.append(eid)
+            records.append(shape_event(item, instance))
+        cursor = body.get("next_cursor")
+        pages += 1
+        if not cursor:
+            break
+    else:
+        # Fell out on MAX_PAGES with a cursor still live: the window is bigger than one run
+        # can drain. Do NOT advance the watermark -- the next run picks the rest up.
+        log("page cap hit with cursor outstanding; leaving watermark at %s" % watermark)
+        return records, watermark, fresh_ids
+
+    return records, until, fresh_ids
+
+
+def poll_vulns(token, instance):
+    body = get_json("/api/v1/siem/vulnerabilities/summary", {}, token)
+    by_eco = body.get("by_ecosystem") or {}
+    totals = {}
+    for severities in by_eco.values():
+        for sev, count in severities.items():
+            totals[sev.lower()] = totals.get(sev.lower(), 0) + int(count)
+    return {
+        "timestamp": iso(datetime.now(timezone.utc)),
+        "dependably": {
+            "instance": instance,
+            "record_type": "vuln_summary",
+            "packages_total": body.get("packages_total"),
+            "packages_affected": body.get("packages_affected"),
+            "critical": totals.get("critical", 0),
+            "high": totals.get("high", 0),
+            "medium": totals.get("medium", 0),
+            "low": totals.get("low", 0),
+            "unknown": totals.get("unknown", 0),
+            "by_ecosystem": {
+                eco: {s.lower(): c for s, c in sev.items()} for eco, sev in by_eco.items()
+            },
+        },
+    }
+
+
+def replay(hours):
+    """Rewinds the watermark so the next run re-emits an already-collected window.
+
+    Needed because wazuh-logcollector seeks to the end of a file it has not seen before:
+    lines the poller wrote before the agent was configured are never read. Re-emitting them
+    appends them as new lines, which the agent does pick up. The alert timestamps are then
+    ingest time, not event time -- data.dependably.event_time carries the real instant, and
+    the dashboard's supply-chain table shows that column rather than the alert timestamp.
+    """
+    state = load_state()
+    state["watermark"] = iso(datetime.now(timezone.utc) - timedelta(hours=hours))
+    state["recent_ids"] = []
+    state.pop("last_vuln_poll", None)
+    save_state(state)
+    log("replay armed: watermark rewound to %s" % state["watermark"])
+    print("watermark rewound to %s; the next poll re-emits that window" % state["watermark"])
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--replay":
+        replay(int(sys.argv[2]) if len(sys.argv) > 2 else 24)
+        return 0
+
+    instance = urllib.parse.urlsplit(INSTANCE).netloc
+    try:
+        token = read_token()
+    except OSError as exc:
+        log("token unreadable: %s" % exc)
+        emit([error_record("token", exc)])
+        return 1
+    if not token:
+        log("token file is empty")
+        emit([error_record("token", "token file is empty")])
+        return 1
+
+    state = load_state()
+    out, failed = [], False
+
+    try:
+        records, watermark, fresh_ids = poll_events(token, state, instance)
+        out.extend(records)
+        # Committed together: advancing the watermark without keeping the ids that came
+        # from that window would reopen the duplicate the ring exists to close.
+        state["watermark"] = watermark
+        state["recent_ids"] = (state.get("recent_ids", []) + fresh_ids)[-RECENT_IDS_KEPT:]
+        log("events: %d new, watermark %s" % (len(records), watermark))
+    except (urllib.error.URLError, urllib.error.HTTPError, ValueError, OSError) as exc:
+        detail = exc
+        if isinstance(exc, urllib.error.HTTPError):
+            detail = "HTTP %s %s" % (exc.code, exc.reason)
+        log("event poll failed: %s (watermark held)" % detail)
+        out.append(error_record("events", detail))
+        failed = True
+
+    last_vuln = state.get("last_vuln_poll", 0)
+    if time.time() - last_vuln >= VULN_POLL_SECONDS:
+        try:
+            out.append(poll_vulns(token, instance))
+            state["last_vuln_poll"] = time.time()
+        except (urllib.error.URLError, urllib.error.HTTPError, ValueError, OSError) as exc:
+            detail = exc
+            if isinstance(exc, urllib.error.HTTPError):
+                detail = "HTTP %s %s" % (exc.code, exc.reason)
+            log("vuln poll failed: %s" % detail)
+            out.append(error_record("vulnerabilities", detail))
+            failed = True
+
+    emit(out)
+    save_state(state)
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

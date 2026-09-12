@@ -1,0 +1,181 @@
+# Dependably audit feed into Wazuh
+
+Monitors the self-hosted dependably artifact registry at `dependably.northwardlabs.ca`
+from the homelab Wazuh manager (192.168.2.18, v4.12.0). Proof of concept for
+[dependably-community#668](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-community/-/work_items/668);
+the generalized write-up belongs in `dependably-documentation` as an integration section.
+
+```
+dependably.northwardlabs.ca                         studio (Wazuh agent 011)
+  GET /api/v1/siem/events/auth  ──────────────►  dependably-siem-poller.py  (launchd, 60 s)
+  GET /api/v1/siem/vulnerabilities/summary               │
+      (every 15 min)                                     ▼
+                                          ~/Library/Logs/dependably-siem/audit.log
+                                                         │  one JSON object per line
+                                                         ▼
+                                     wazuh-logcollector  <log_format>json</log_format>
+                                                         ▼
+                        manager ── dependably_rules.xml (100100-100199) ── "Dependably Registry"
+```
+
+## Why pull and not push
+
+Dependably ships both a push forwarder (`SIEM_WEBHOOK_URL` / `SIEM_SYSLOG_HOST`) and a
+pull API. Pull wins here on every axis that matters:
+
+| | Push | Pull |
+|---|---|---|
+| Real time | yes | no (60 s) |
+| Needs an instance restart + env change | yes | no |
+| Backfills existing history | no | yes, to `SIEM_MAX_LOOKBACK_DAYS` (90) |
+| Carries `source_ip` | no - `SiemEvent` omits it | yes |
+| Wazuh ingests it natively | no (CEF needs a decoder; no HTTP receiver) | yes |
+
+## Install
+
+1. **Token.** A dependably API token carrying `read:audit`. Never in this repo:
+
+       mkdir -p ~/Library/Application\ Support/dependably-siem-poller
+       chmod 700 ~/Library/Application\ Support/dependably-siem-poller
+       printf '%s' '<token>' > ~/Library/Application\ Support/dependably-siem-poller/token
+       chmod 600 ~/Library/Application\ Support/dependably-siem-poller/token
+
+2. **Poller under launchd** (runs as your user, no privileges needed):
+
+       cp ca.northwardlabs.dependably-siem-poller.plist ~/Library/LaunchAgents/
+       launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ca.northwardlabs.dependably-siem-poller.plist
+       launchctl list | grep dependably-siem
+
+3. **Agent config** (needs sudo):
+
+       sudo ./install-agent-config.sh
+
+   It creates `/usr/local/var/log/dependably-siem` owned by you, inserts the `<localfile>`
+   **inside the first `<ossec_config>` block**, restarts the agent with a clean PATH, and
+   prints the count of files logcollector has opened. Do not append a new `<ossec_config>`
+   block: on this agent an appended block parses without error, reports nothing from
+   `wazuh-logcollector -t`, and is then silently ignored. That is how the Docker shipper's
+   block in `../mac-studio-docker/` came to be inert without anyone noticing - those logs
+   have no rules, so no alert was ever expected and nothing distinguished "no rules" from
+   "not being read". Old manual steps, kept only for reference:
+
+       # Absolute path, not ~: `sudo sh -c` expands ~ against root's home, not yours,
+       # so a tilde here silently appends nothing and the restart still succeeds.
+       sudo sh -c 'cat /Users/michael/Projects/HomeLab/wazuh/dependably/ossec.conf.dependably.xml >> /Library/Ossec/etc/ossec.conf'
+       sudo grep -c dependably-siem /Library/Ossec/etc/ossec.conf    # must print 1, not 0
+       sudo env PATH=/usr/bin:/bin:/usr/sbin:/sbin /Library/Ossec/bin/wazuh-control restart
+
+4. **Manager rules.** Dashboard, Server management, Rules, Import files, upload
+   `dependably_rules.xml` (tick Overwrite when replacing). No manager restart is needed;
+   confirm with Server management, Rules, filter `Custom rules`.
+
+5. **Dashboard.** Dashboards Management, Saved objects, Import `dependably-dashboard.ndjson`.
+   Opens at Dashboards, "Dependably Registry".
+
+6. **Replay history into the new feed.** `wazuh-logcollector` seeks to the end of a file it
+   has not seen before, so everything written before step 3 is never read. Re-emit it:
+
+       ./dependably-siem-poller.py --replay 2160     # 90 days, the server's lookback cap
+
+   Those alerts carry ingest time as their `timestamp`; `data.dependably.event_time` holds
+   the real instant, and the dashboard tables show that column instead.
+
+## What it detects
+
+Rules `100100-100199`, all verified against `/logtest` before shipping - including a
+negative control (a non-dependably JSON line matches nothing) and the catch-all.
+
+| Rule | Level | Signal |
+|---|---|---|
+| 100120 | 12 | `package.replace` where the artifact hash **changed** - published bytes swapped under an existing version |
+| 100113 | 12 | login success inside 300 s of a run of failures |
+| 100122 | 10 | `package.override.set` to `allow` - a human overrode a policy block on a named package |
+| 100111 | 10 | 8 failed logins in 120 s |
+| 100114 | 10 | account lockout |
+| 100140 | 10 | `rbac.*` / `auth.saml.role*` privilege change |
+| 100152 | 10 | tenant deleted |
+| 100170 | 10 | the poller itself failed |
+| 100123 / 100130 / 100141 / 100150 / 100151 / 100161 | 7 | publish, token created, credential change, setting change, tenant lifecycle, CRITICAL vulns present |
+| 100101 | 3 | catch-all, so a newly added action is still indexed before it has a rule |
+
+Two design points worth keeping:
+
+- **Wazuh rules cannot compare one field against another**, so "did the artifact bytes
+  actually change?" is decided in the poller and published as
+  `dependably.artifact_hash_changed`, which rule 100120 matches as a plain value.
+- **Field matches are pinned to `type="pcre2"`.** In OS_Regex `\.` means *any character*,
+  so `^login\.failure$` would quietly also match `loginXfailure`.
+
+## What it cannot detect, and why
+
+These are properties of dependably's SIEM surface, not of this integration. All are
+recorded as gaps G1-G5 on issue #668.
+
+- **Failed logins are unattributable.** `login.failure` rows carry no actor id and no
+  email. Behind a reverse proxy with `TRUSTED_PROXIES` unset - the documented fail-closed
+  default - every `source_ip` is the Docker bridge gateway, `172.17.0.1`. Rule 100111
+  counts failures honestly; nothing can say whose or from where.
+- **Policy denials are invisible.** A blocked pull lands in dependably's `activity` plane;
+  the SIEM endpoint reads `audit_log`, and the two are deliberately never dual-written.
+  "Someone tried to pull a package the policy blocks" is the highest-value detection this
+  product could emit and it does not reach a SIEM at all.
+- **Everything is an opaque id.** `actorEmail` and `orgSlug` are always null in the feed.
+- **The action vocabulary is hardcoded.** `action=` is a repeatable prefix filter with no
+  wildcard, so `ACTION_PREFIXES` in the poller has to name every category, and a category
+  dependably adds later is silently absent until it is added there too.
+
+## The gotcha that cost the most time: analysisd does not reload the ruleset
+
+**Importing a rules file does not put it into effect. The manager has to be restarted.**
+
+What makes this expensive is that the two obvious ways to verify a rule both pass while the
+running manager is still using the old ruleset:
+
+- `GET /rules` lists the new rules -- it reads the **files** on disk, not what analysisd loaded.
+- `/logtest` fires them correctly -- a logtest session **loads its own copy** of the ruleset
+  from disk when the session opens.
+
+So the rules can look installed and verified from every angle while live events produce
+nothing at all. The fix:
+
+    PUT /manager/restart          # or Server management > Status > Restart
+
+Verify with real events rather than logtest:
+
+    GET wazuh-alerts-*/_search  {"query":{"term":{"rule.groups":"dependably"}}}
+
+Two things that look like this failure but are not:
+
+- **`grep -c 'analyzing file'` returning 0 does not mean no file is being read.** logcollector
+  logs `Analyzing file:` for a literal `<location>` but not for a wildcard one. The authority
+  on what is actually being tailed, and how far, is
+  `/Library/Ossec/queue/logcollector/file_status.json` -- it lists every file with a byte
+  offset. Check that, not ossec.log.
+- **Wildcard `<location>` works fine.** So does appending a separate `<ossec_config>` block.
+  Both were suspected here and both were wrong.
+
+## Operating notes
+
+- **Watermark discipline.** The poller advances its watermark only after a fully successful
+  drain. A failed poll leaves it alone and re-reads the window next run, so a transient
+  outage costs duplicates (which the id ring absorbs) rather than a silent hole.
+- **Silence is ambiguous, so the poller reports its own failures** as `poller_error`
+  records behind rule 100170. An empty "Feed health" panel is the healthy state.
+- **`detail` is lifted through a closed allowlist** (`DETAIL_KEYS`). The payload is
+  free-form per action; letting it expand straight into the index means an unbounded field
+  count in `wazuh-alerts-*`. Anything not listed survives verbatim in `detail_raw`.
+- **Removal:** `launchctl bootout gui/$(id -u)/ca.northwardlabs.dependably-siem-poller`,
+  delete the plist, remove the `<ossec_config>` block, delete `dependably_rules.xml` from
+  the manager, delete the saved objects, and remove `~/Library/Logs/dependably-siem` and
+  `~/Library/Application Support/dependably-siem-poller` (the token lives there).
+
+## Files
+
+| File | Where it goes |
+|---|---|
+| `dependably-siem-poller.py` | runs in place, from launchd |
+| `ca.northwardlabs.dependably-siem-poller.plist` | `~/Library/LaunchAgents/` |
+| `ossec.conf.dependably.xml` | appended to `/Library/Ossec/etc/ossec.conf` |
+| `dependably_rules.xml` | manager `etc/rules/`, via the dashboard's rules importer |
+| `dependably-dashboard.ndjson` | dashboard saved objects, via Import |
+| `build-dashboard.py` | regenerates the ndjson; edit this, not the ndjson |
