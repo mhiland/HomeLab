@@ -193,6 +193,23 @@ that never fires also passes the negative case:
     12 backfilled failures -> 100115 x12, and 100111 must NOT appear
     12 live failures       -> 100110, with 100111 firing on the 8th
 
+## A pinned filter silently narrows every panel
+
+Clicking a bar or a table cell pins a dashboard-level filter that ANDs into every panel's own
+query. It is easy to miss in the filter bar and invisible in a screenshot.
+
+**The tell is unrelated tiles showing the same number.** A pinned
+`artifact_hash_changed: true` produces:
+
+    Audit events 45 | Supply-chain alerts 45 | Artifact bytes replaced 45
+    Failed logins 0 | CRITICAL vulns - | Packages affected -
+
+...because a login has no artifact hash and a vulnerability snapshot has no such field at all,
+so `max` has nothing to aggregate and renders `-`. Nothing is broken; clear the filter pill.
+
+Unfiltered all-time counts as of the PoC, for comparison: Audit events 332, Supply-chain
+alerts 81, Artifact bytes replaced 45, Failed logins 40.
+
 ## Expect up to two minutes of latency
 
 A new event is not visible on the dashboard immediately, and that is normal. Two 60-second

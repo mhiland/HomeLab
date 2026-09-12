@@ -125,14 +125,20 @@ objs.append({
                        "Pulled every 60s by `dependably-siem-poller.py` on **studio**, "
                        "rules `100100-100199`. "
                        "[Homelab SOC Overview](/app/dashboards#/view/homelab-soc-overview)\n\n"
-                       "Two caveats this dashboard cannot paper over:\n\n"
+                       "Three things this dashboard cannot paper over:\n\n"
                        "- **Failed logins have no attributable source.** Dependably's "
                        "`login.failure` rows carry no actor id, and behind a reverse proxy "
                        "with `TRUSTED_PROXIES` unset every `source_ip` is the Docker bridge "
                        "(`172.17.0.1`). Counts are real; attribution is not.\n"
                        "- **The time axis is ingest time.** Replayed history all lands at the "
                        "moment it was replayed; `data.dependably.event_time` holds the real "
-                       "instant and is shown as a column in the tables below."},
+                       "instant and is shown as a column in the tables below.\n"
+                       "- **Check the filter bar before trusting a number.** Clicking a bar or a "
+                       "table cell pins a filter that narrows *every* panel, which is easy to "
+                       "miss. Unrelated tiles showing the same count is the usual tell - e.g. a "
+                       "pinned `artifact_hash_changed: true` makes Audit events, Supply-chain "
+                       "alerts and Artifact bytes replaced all show the same number, and blanks "
+                       "the vulnerability tiles, because a vuln snapshot has no such field."},
             "aggs": []}, separators=(",", ":")),
         "uiStateJSON": "{}", "description": "", "version": 1,
         "kibanaSavedObjectMeta": {"searchSourceJSON": json.dumps(
