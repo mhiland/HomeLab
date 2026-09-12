@@ -50,16 +50,24 @@ VULN_POLL_SECONDS = 15 * 60
 HTTP_TIMEOUT = 30
 BACKFILL_HOURS = int(os.environ.get("DEPENDABLY_SIEM_BACKFILL_HOURS", "24"))
 
-# The server's default prefix set is login./lockout./token./rbac. only, which drops every
-# package.*, tenant.*, user.* and auth.saml.* event on the floor. There is no wildcard
-# spelling (an empty action= becomes the pattern ".%" and matches nothing), so the
-# vocabulary has to be named here. Anything dependably adds later is invisible until it
-# is added to this list -- that is a product gap, tracked as G4 on the PoC issue.
+# The action filter builds `LIKE '<prefix>.%'` server-side -- always with a trailing dot. So
+# only actions that CONTAIN a dot can ever be returned, and these twelve prefixes are the
+# complete reachable set (34 of dependably's 86 audit_log actions as of 0.10.0).
+#
+# The other 52 are flat names with underscores (checksum_failure, ssrf_blocked,
+# provenance_verification_failed, upstream_source_pin_violation, token_created,
+# member_role_changed, trust_anchor_added, quarantine_decision, ...) and NO value of `action=`
+# can match them -- passing "token_created" yields the pattern 'token_created.%'. They are not
+# missing from this list; they are unreachable through the API. Several are exactly the events
+# a SIEM most wants. Filed against dependably as a blocking gap on issue #668.
+#
+# Note the server's own documented default (login. lockout. token. rbac.) is half dead for the
+# same reason: the writers emit token_created and member_role_changed, so `token.` and `rbac.`
+# match nothing. Never rely on the default; always pass this list explicitly.
 ACTION_PREFIXES = [
-    "login", "lockout", "token", "rbac", "user", "auth", "saml",
-    "package", "proxy", "block", "vuln", "tenant", "org", "upstream",
-    "system_admin", "webhook", "threatfeed", "policy", "license", "claim",
-    "banner", "index", "metadata",
+    "login", "lockout", "auth", "saml", "user",      # authentication and accounts
+    "package", "oci", "project", "sbom", "claim",    # artifacts and supply chain
+    "tenant", "banner",                              # tenancy and configuration
 ]
 
 # Detail keys lifted to stable first-class fields so rules can match on a fixed name.
