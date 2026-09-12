@@ -10,9 +10,6 @@ next_cursor to exhaustion, and appends one JSON object per line to the output lo
 watermark advances only after a fully successful drain, so a failed poll re-reads its
 window on the next run instead of leaving a hole nobody can see.
 
-Every 15 minutes it also snapshots GET /api/v1/siem/vulnerabilities/summary as a single
-synthetic record, which gives the dashboard a vulnerability-posture time series.
-
 A poll that fails emits a poller_error record. A collector that has stopped collecting
 has to be visible in the SIEM; silence is indistinguishable from "nothing happened".
 """
@@ -46,7 +43,6 @@ MAX_BYTES = 20 * 1024 * 1024        # rotate the output past this size, one .1 k
 PAGE_LIMIT = 500                    # server clamps to 500
 MAX_PAGES = 40                      # 20k events per run; a cursor loop cannot run away
 RECENT_IDS_KEPT = 2000              # de-dupe ring, see DEDUPE below
-VULN_POLL_SECONDS = 15 * 60
 # An event older than this at collection time is history, not something happening now. Wazuh
 # correlates on INGEST time, so backfilled events would otherwise fabricate bursts: a 24h first
 # run replays a day of scattered failures into one second and trips the brute-force rule on
@@ -72,8 +68,9 @@ BACKFILL_HOURS = int(os.environ.get("DEPENDABLY_SIEM_BACKFILL_HOURS", "24"))
 # match nothing. Never rely on the default; always pass this list explicitly.
 ACTION_PREFIXES = [
     "login", "lockout", "auth", "saml", "user",      # authentication and accounts
-    "package", "oci", "project", "sbom", "claim",    # artifacts and supply chain
-    "tenant", "banner",                              # tenancy and configuration
+    "mfa",                                           # MFA lifecycle: disable, recovery-code use
+    "oci", "metrics",                                # authorization/access denials
+    "tenant", "system_admin",                        # security configuration, operator actions
 ]
 
 # Actions collected by the prefixes above but deliberately NOT forwarded. These are DevOps
@@ -85,6 +82,13 @@ ACTION_PREFIXES = [
 #   version_overwrite_policy, and the event does not carry it, so no rule could separate a
 #   policy violation from normal churn. The security-relevant form of this question is a
 #   block-gate denial (dependably-community#670), not this event.
+# package.override.set: an authorized admin accepting a risk for one package, through the
+#   product's intended workflow. A SOC cannot triage it -- the event records only
+#   {ecosystem, purl_name, override_value} with NO blocked arm, so there is no way to tell a
+#   waved-through licence mismatch from a waved-through known-malicious package, and those
+#   demand opposite responses. The answer always lives with the registry owner, so the alert
+#   routes straight back. Its proper home is the quarantine review workflow
+#   (QuarantineController's quarantine_decision), not a SIEM.
 # project.create / project.created: project lifecycle. Two spellings exist for the same event
 #   -- ProjectsController writes "project.created", SbomController writes "project.create".
 #
@@ -92,6 +96,7 @@ ACTION_PREFIXES = [
 # investigation. Pivot to dependably's own audit trail for that.
 EXCLUDED_ACTIONS = frozenset({
     "package.replace",
+    "package.override.set",
     "project.create",
     "project.created",
 })
@@ -300,31 +305,6 @@ def poll_events(token, state, instance):
     return records, until, fresh_ids
 
 
-def poll_vulns(token, instance):
-    body = get_json("/api/v1/siem/vulnerabilities/summary", {}, token)
-    by_eco = body.get("by_ecosystem") or {}
-    totals = {}
-    for severities in by_eco.values():
-        for sev, count in severities.items():
-            totals[sev.lower()] = totals.get(sev.lower(), 0) + int(count)
-    return {
-        "timestamp": iso(datetime.now(timezone.utc)),
-        "dependably": {
-            "instance": instance,
-            "record_type": "vuln_summary",
-            "packages_total": body.get("packages_total"),
-            "packages_affected": body.get("packages_affected"),
-            "critical": totals.get("critical", 0),
-            "high": totals.get("high", 0),
-            "medium": totals.get("medium", 0),
-            "low": totals.get("low", 0),
-            "unknown": totals.get("unknown", 0),
-            "by_ecosystem": {
-                eco: {s.lower(): c for s, c in sev.items()} for eco, sev in by_eco.items()
-            },
-        },
-    }
-
 
 def replay(hours):
     """Rewinds the watermark so the next run re-emits an already-collected window.
@@ -333,12 +313,11 @@ def replay(hours):
     lines the poller wrote before the agent was configured are never read. Re-emitting them
     appends them as new lines, which the agent does pick up. The alert timestamps are then
     ingest time, not event time -- data.dependably.event_time carries the real instant, and
-    the dashboard's supply-chain table shows that column rather than the alert timestamp.
+    the dashboard's tables show that column rather than the alert timestamp.
     """
     state = load_state()
     state["watermark"] = iso(datetime.now(timezone.utc) - timedelta(hours=hours))
     state["recent_ids"] = []
-    state.pop("last_vuln_poll", None)
     save_state(state)
     log("replay armed: watermark rewound to %s" % state["watermark"])
     print("watermark rewound to %s; the next poll re-emits that window" % state["watermark"])
@@ -379,19 +358,6 @@ def main():
         log("event poll failed: %s (watermark held)" % detail)
         out.append(error_record("events", detail))
         failed = True
-
-    last_vuln = state.get("last_vuln_poll", 0)
-    if time.time() - last_vuln >= VULN_POLL_SECONDS:
-        try:
-            out.append(poll_vulns(token, instance))
-            state["last_vuln_poll"] = time.time()
-        except (urllib.error.URLError, urllib.error.HTTPError, ValueError, OSError) as exc:
-            detail = exc
-            if isinstance(exc, urllib.error.HTTPError):
-                detail = "HTTP %s %s" % (exc.code, exc.reason)
-            log("vuln poll failed: %s" % detail)
-            out.append(error_record("vulnerabilities", detail))
-            failed = True
 
     emit(out)
     save_state(state)

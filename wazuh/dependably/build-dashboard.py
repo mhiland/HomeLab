@@ -150,13 +150,9 @@ objs.append({
 DEP = "rule.groups:dependably"
 
 metric("dep-m-events", "Audit events", DEP)
-metric("dep-m-supply", "Supply-chain alerts", "rule.groups:dependably_supply_chain", color_mode="Labels")
+metric("dep-m-config", "Security config changes", "rule.id:100153", color_mode="Labels")
 metric("dep-m-authz", "Authorization denials", "rule.groups:dependably_authz", color_mode="Labels")
 metric("dep-m-authfail", "Failed logins", "rule.id:100110")
-metric("dep-m-critical", "CRITICAL vulns (latest)", "rule.groups:dependably_vuln",
-       agg=max_agg("dep_critical"))
-metric("dep-m-affected", "Packages affected (latest)", "rule.groups:dependably_vuln",
-       agg=max_agg("dep_affected"))
 metric("dep-m-health", "Poller errors", "rule.id:100170", color_mode="Labels")
 
 # Auth outcome over time.
@@ -176,22 +172,14 @@ vis("dep-actions", "Events by action", {
              terms("2", "data.dependably.action", "segment", 15)],
 }, DEP)
 
-# Vulnerability posture. A gauge sampled every 15 min, so max() per bucket is the reading.
-vis("dep-vuln-time", "Vulnerability posture over time", {
-    "title": "Vulnerability posture over time", "type": "line",
-    "params": dict(AXES, type="line", seriesParams=[
-        series("line", "CRITICAL", "1"), series("line", "HIGH", "3"), series("line", "MEDIUM", "4")]),
-    "aggs": [max_agg("dep_critical"),
-             date_hist("2"),
-             dict(max_agg("dep_high"), id="3"),
-             dict(max_agg("dep_medium"), id="4")],
-}, "rule.groups:dependably_vuln")
 
-table("dep-supply-table", "Policy overrides and authorization denials",
-      "rule.groups:(dependably_supply_chain or dependably_authz)", [
+table("dep-supply-table", "Authorization denials",
+      "rule.groups:dependably_authz", [
+    # Nested terms aggs intersect: a document missing ANY of these fields produces no row at
+    # all. purl was here and authorization denials do not carry one, so the table rendered
+    # empty while its own metric tile showed 60. Only fields present on every matching event.
     ("data.dependably.event_time", "Event time (UTC)", 50),
     ("data.dependably.action", "Action", 10),
-    ("data.dependably.purl", "Package", 50),
     ("data.dependably.actor_id", "Actor", 20),
     ("data.dependably.detail_raw", "Detail", 50),
 ], description="A human disabling a control for a named package, and credentials attempting "
@@ -219,19 +207,16 @@ table("dep-health-table", "Feed health: poller failures", "rule.id:100170", [
 
 LAYOUT = [
     ("dep-nav",            0,  0, 48, 6),
-    ("dep-m-events",       0,  6,  7, 6),
-    ("dep-m-supply",       7,  6,  7, 6),
-    ("dep-m-authz" ,      14,  6,  7, 6),
-    ("dep-m-authfail",    21,  6,  7, 6),
-    ("dep-m-critical",    28,  6,  7, 6),
-    ("dep-m-affected",    35,  6,  7, 6),
-    ("dep-m-health",      42,  6,  6, 6),
-    ("dep-supply-table",   0, 12, 30, 15),
-    ("dep-actions",       30, 12, 18, 15),
-    ("dep-auth-time",      0, 27, 24, 13),
-    ("dep-vuln-time",     24, 27, 24, 13),
-    ("dep-config-table",   0, 40, 30, 14),
-    ("dep-health-table",  30, 40, 18, 14),
+    ("dep-m-events",       0,  6, 10, 6),
+    ("dep-m-authz",       10,  6, 10, 6),
+    ("dep-m-config",      20,  6,  9, 6),
+    ("dep-m-authfail",    29,  6,  9, 6),
+    ("dep-m-health",      38,  6, 10, 6),
+    ("dep-supply-table",   0, 12, 28, 15),
+    ("dep-actions",       28, 12, 20, 15),
+    ("dep-auth-time",      0, 27, 28, 13),
+    ("dep-health-table",  28, 27, 20, 13),
+    ("dep-config-table",   0, 40, 48, 14),
 ]
 
 panels, refs = [], []

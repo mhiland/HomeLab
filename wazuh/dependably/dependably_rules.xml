@@ -97,7 +97,6 @@
   <!-- == Supply chain ============================================================
        The two signals nothing else in the fleet can produce. -->
 
-
   <!-- == Authorization and credential denial =====================================
        A credential attempting an operation its capabilities do not grant. Fully attributed
        (actor + source_ip) and the detail names what was required versus what the token held.
@@ -133,20 +132,31 @@
     <group>dependably_config,</group>
   </rule>
 
-  <!-- A human told the block gate to allow a specific package anyway. -->
-  <rule id="100122" level="10">
+  <!-- MFA lifecycle. Reachable through the existing filter all along; the PoC collector simply
+       was not asking for it. Parent first so the high-risk subset below can chain off it. -->
+  <rule id="100129" level="7">
     <if_sid>100101</if_sid>
-    <field name="dependably.action" type="pcre2">^package\.override\.set$</field>
-    <field name="dependably.detail_override_value" type="pcre2">^allow$</field>
-    <description>Dependably: policy block OVERRIDDEN to allow $(dependably.purl) by $(dependably.actor_id).</description>
-    <group>dependably_supply_chain,</group>
+    <field name="dependably.action" type="pcre2">^mfa\.</field>
+    <description>Dependably: MFA lifecycle - $(dependably.action) by $(dependably.actor_id).</description>
+    <group>dependably_credentials,</group>
   </rule>
 
-  <rule id="100123" level="7">
+  <!-- Turning MFA off, or spending a recovery code, are the two classic post-takeover moves:
+       one removes the second factor, the other bypasses it. -->
+  <rule id="100128" level="10">
+    <if_sid>100129</if_sid>
+    <field name="dependably.action" type="pcre2">^mfa\.(disabled|recovery_code_used)$</field>
+    <description>Dependably: MFA WEAKENED - $(dependably.action) by $(dependably.actor_id).</description>
+    <group>dependably_credentials,dependably_privilege,</group>
+  </rule>
+
+  <!-- Instance-operator actions. Legitimate admin work, but also exactly what an attacker does
+       with a stolen operator session, so it is worth a record a SOC can see. -->
+  <rule id="100154" level="7">
     <if_sid>100101</if_sid>
-    <field name="dependably.action" type="pcre2">^package\.(publish|unlist)$</field>
-    <description>Dependably: $(dependably.action) of $(dependably.purl).</description>
-    <group>dependably_supply_chain,</group>
+    <field name="dependably.action" type="pcre2">^system_admin\.</field>
+    <description>Dependably: instance-operator action - $(dependably.action).</description>
+    <group>dependably_privilege,</group>
   </rule>
 
   <!-- == Credentials and privilege ===============================================
@@ -183,7 +193,6 @@
 
   <!-- == Tenant and configuration ================================================  -->
 
-
   <rule id="100150" level="5">
     <if_sid>100101</if_sid>
     <field name="dependably.action" type="pcre2">^tenant\.setting\.change$</field>
@@ -210,24 +219,6 @@
     <field name="dependably.action" type="pcre2">^tenant\.(deleted|hard_deleted)$</field>
     <description>Dependably: tenant DELETED - $(dependably.action).</description>
     <group>dependably_config,</group>
-  </rule>
-
-  <!-- == Vulnerability posture ===================================================
-       A gauge, not an event: one snapshot every 15 minutes gives the dashboard a
-       time series. Indexed at level 3 so the series exists even when nothing is wrong. -->
-
-  <rule id="100160" level="3">
-    <if_sid>100100</if_sid>
-    <field name="dependably.record_type" type="pcre2">^vuln_summary$</field>
-    <description>Dependably: $(dependably.packages_affected) of $(dependably.packages_total) packages affected.</description>
-    <group>dependably_vuln,</group>
-  </rule>
-
-  <rule id="100161" level="7">
-    <if_sid>100160</if_sid>
-    <field name="dependably.critical" type="pcre2">^[1-9]</field>
-    <description>Dependably: $(dependably.critical) CRITICAL vulnerabilities in the registry inventory.</description>
-    <group>dependably_vuln,</group>
   </rule>
 
   <!-- == Feed health ============================================================
