@@ -76,6 +76,26 @@ ACTION_PREFIXES = [
     "tenant", "banner",                              # tenancy and configuration
 ]
 
+# Actions collected by the prefixes above but deliberately NOT forwarded. These are DevOps
+# operational insight, not security telemetry: they belong in dependably's own audit trail,
+# which already has them. Dropping at the poller rather than with a level-0 rule means no
+# bandwidth, no index space and no field cardinality spent on events a SOC would never act on.
+#
+# package.replace: a developer republishing a version. Whether that is permitted is the org's
+#   version_overwrite_policy, and the event does not carry it, so no rule could separate a
+#   policy violation from normal churn. The security-relevant form of this question is a
+#   block-gate denial (dependably-community#670), not this event.
+# project.create / project.created: project lifecycle. Two spellings exist for the same event
+#   -- ProjectsController writes "project.created", SbomController writes "project.create".
+#
+# Trade-off accepted: neither is available in Wazuh as forensic context during an
+# investigation. Pivot to dependably's own audit trail for that.
+EXCLUDED_ACTIONS = frozenset({
+    "package.replace",
+    "project.create",
+    "project.created",
+})
+
 # Detail keys lifted to stable first-class fields so rules can match on a fixed name.
 # Deliberately a closed allowlist: `detail` is free-form per action, and letting it
 # expand straight into the index means an unbounded field count in wazuh-alerts-*.
@@ -254,6 +274,8 @@ def poll_events(token, state, instance):
         body = get_json("/api/v1/siem/events/auth", params, token)
         items = body.get("items") or []
         for item in items:
+            if item.get("action") in EXCLUDED_ACTIONS:
+                continue
             eid = item.get("id")
             # DEDUPE: ListAuthEventsAsync closes the window on both ends (>= / <=), so an
             # event landing on exactly the millisecond we pass as `until` comes back again

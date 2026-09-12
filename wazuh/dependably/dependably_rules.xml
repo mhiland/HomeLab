@@ -97,20 +97,6 @@
   <!-- == Supply chain ============================================================
        The two signals nothing else in the fleet can produce. -->
 
-  <!-- Operational, deliberately NOT a detection. A replace is a developer republishing a
-       version, and whether that is permitted is the org's version_overwrite_policy setting,
-       which this event does not carry. So a rule cannot tell a policy-violating replace from a
-       permitted one: it is unactionable by construction. At ~13% of the feed it was also 100%
-       of the level-12 tier, which is how a SOC learns to mute a rule and loses the edge cases
-       with it. Indexed at level 3 so the hashes stay searchable in the audit trail.
-       The security-relevant question, "did a replace happen where policy forbade it?", is a
-       block-gate denial and lives in the activity plane (dependably-community#670). -->
-  <rule id="100120" level="3">
-    <if_sid>100101</if_sid>
-    <field name="dependably.action" type="pcre2">^package\.replace$</field>
-    <description>Dependably: artifact republished ($(dependably.artifact_hash_changed) bytes changed) - $(dependably.purl).</description>
-    <group>dependably_operational,</group>
-  </rule>
 
   <!-- == Authorization and credential denial =====================================
        A credential attempting an operation its capabilities do not grant. Fully attributed

@@ -187,14 +187,16 @@ vis("dep-vuln-time", "Vulnerability posture over time", {
              dict(max_agg("dep_medium"), id="4")],
 }, "rule.groups:dependably_vuln")
 
-table("dep-supply-table", "Artifact and policy events",
-      "rule.groups:(dependably_supply_chain or dependably_operational)", [
+table("dep-supply-table", "Policy overrides and authorization denials",
+      "rule.groups:(dependably_supply_chain or dependably_authz)", [
     ("data.dependably.event_time", "Event time (UTC)", 50),
     ("data.dependably.action", "Action", 10),
     ("data.dependably.purl", "Package", 50),
-    ("data.dependably.detail_prior_artifact_hash", "Prior hash", 50),
-    ("data.dependably.detail_artifact_hash", "New hash", 50),
-], description="Policy overrides at level 10, alongside artifact republishes kept at level 3 as an operational record.")
+    ("data.dependably.actor_id", "Actor", 20),
+    ("data.dependably.detail_raw", "Detail", 50),
+], description="A human disabling a control for a named package, and credentials attempting "
+                "operations they are not entitled to. Artifact republishes are deliberately not "
+                "collected - they are operational and live in dependably's own audit trail.")
 
 table("dep-config-table", "Configuration and tenant changes",
       "rule.groups:(dependably_config or dependably_privilege or dependably_credentials)", [

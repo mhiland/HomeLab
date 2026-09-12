@@ -121,24 +121,33 @@ rule has to pass: if this fires at 02:00, is there something to do about it?
 | 100123 / 100130 / 100141 / 100150 / 100151 / 100161 | 7 | publish, token created, credential change, setting change, tenant lifecycle, CRITICAL vulns present |
 | 100101 | 3 | catch-all, so a newly added action is still indexed before it has a rule |
 
-### Why `package.replace` is level 3 and not level 12
+### What is deliberately not collected
 
-It started at 12 - "published bytes swapped under a version that already existed" reads like
-tamper. It is not, in this product:
+`package.replace`, `project.create` and `project.created` are filtered out in the poller
+(`EXCLUDED_ACTIONS`), not merely down-ranked. They are DevOps operational insight and they
+already live in dependably's own audit trail; forwarding them spends bandwidth, index space and
+field cardinality on events a SOC would never act on.
+
+`package.replace` in particular *looks* like tamper - "published bytes swapped under a version
+that already existed" - and was originally level 12. It is not a detection here:
 
 - The publishers in a private registry are your own developers.
-- Whether a replace is allowed is the org's `version_overwrite_policy` setting, and the event
-  **does not carry that policy**. A rule cannot distinguish a policy-violating replace from a
-  permitted one, so the alert is unactionable by construction.
-- It was ~13% of the feed and **100% of the level-12 tier**. That is how a SOC learns to mute a
-  rule, and the mute takes the genuine edge cases with it.
+- Whether a replace is permitted is the org's `version_overwrite_policy`, and the event **does
+  not carry that policy**, so no rule can separate a violation from normal churn.
+- It was ~13% of the feed and **100% of the level-12 tier**, which is how a SOC learns to mute a
+  rule and loses the genuine edge cases with it.
 
-The security-relevant version of this question - "did a replace happen where policy forbade
-it?" - is a block-gate denial, which lives in the activity plane and never reaches a SIEM
-(dependably-community#670). Until that lands, this feed cannot answer it at all.
+The security-relevant form of the question - "did a replace happen where policy forbade it?" -
+is a block-gate denial, which lives in the activity plane and never reaches a SIEM
+(dependably-community#670).
 
-The events kept at level 3 are still indexed and searchable; they are an audit trail, which is
-the right home for an operational insight.
+**Trade-off accepted:** neither event is available in Wazuh as forensic context during an
+investigation. Pivot to dependably's own audit trail for that.
+
+After filtering, every action that reaches Wazuh is security-relevant:
+
+    login.success  login.failure  oci.scope_denied  package.override.set
+    tenant.setting.change  auth.saml.*  saml.*        (+ the vuln_summary gauge)
 
 Two design points worth keeping:
 
