@@ -169,6 +169,22 @@ Two things that look like this failure but are not:
 - **Wildcard `<location>` works fine.** So does appending a separate `<ossec_config>` block.
   Both were suspected here and both were wrong.
 
+## Expect up to two minutes of latency
+
+A new event is not visible on the dashboard immediately, and that is normal. Two 60-second
+waits stack:
+
+1. the poller's launchd `StartInterval` (up to 60 s before the event is collected), and
+2. the dashboard's own auto-refresh (another 60 s).
+
+So failing a login and checking the dashboard straight away correctly shows nothing. To test
+without waiting, force a poll and then hit Refresh:
+
+    ./dependably-siem-poller.py && echo polled
+
+If real-time matters more than `source_ip` and backfill, dependably's push forwarder
+(`SIEM_SYSLOG_HOST`) is the trade to make - see the table at the top.
+
 ## Operating notes
 
 - **Watermark discipline.** The poller advances its watermark only after a fully successful
