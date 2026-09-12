@@ -100,10 +100,18 @@ pull API. Pull wins here on every axis that matters:
 Rules `100100-100199`, all verified against `/logtest` before shipping - including a
 negative control (a non-dependably JSON line matches nothing) and the catch-all.
 
+Severity reflects **what a SOC can act on**, not what is technically interesting. The test each
+rule has to pass: if this fires at 02:00, is there something to do about it?
+
 | Rule | Level | Signal |
 |---|---|---|
-| 100120 | 12 | `package.replace` where the artifact hash **changed** - published bytes swapped under an existing version |
-| 100113 | 12 | login success inside 300 s of a run of failures |
+| 100113 | 12 | login success inside 300 s of a failure burst |
+| 100122 | 10 | `package.override.set` to `allow` - a human disabled a control for a named package |
+| 100125 | 10 | repeated authorization denials from one actor - capability probing |
+| 100126 | 10 | SAML role change - privilege movement through the IdP |
+| 100153 | 10 | a **security** setting changed (policy, enforcement, verify, overwrite, MFA, SSO) |
+| 100124 | 7 | authorization denied - a credential attempting what it is not entitled to |
+| 100120 | **3** | `package.replace` - **operational, not a detection** (see below) |
 | 100122 | 10 | `package.override.set` to `allow` - a human overrode a policy block on a named package |
 | 100111 | 10 | 8 failed logins in 120 s |
 | 100114 | 10 | account lockout |
@@ -112,6 +120,25 @@ negative control (a non-dependably JSON line matches nothing) and the catch-all.
 | 100170 | 10 | the poller itself failed |
 | 100123 / 100130 / 100141 / 100150 / 100151 / 100161 | 7 | publish, token created, credential change, setting change, tenant lifecycle, CRITICAL vulns present |
 | 100101 | 3 | catch-all, so a newly added action is still indexed before it has a rule |
+
+### Why `package.replace` is level 3 and not level 12
+
+It started at 12 - "published bytes swapped under a version that already existed" reads like
+tamper. It is not, in this product:
+
+- The publishers in a private registry are your own developers.
+- Whether a replace is allowed is the org's `version_overwrite_policy` setting, and the event
+  **does not carry that policy**. A rule cannot distinguish a policy-violating replace from a
+  permitted one, so the alert is unactionable by construction.
+- It was ~13% of the feed and **100% of the level-12 tier**. That is how a SOC learns to mute a
+  rule, and the mute takes the genuine edge cases with it.
+
+The security-relevant version of this question - "did a replace happen where policy forbade
+it?" - is a block-gate denial, which lives in the activity plane and never reaches a SIEM
+(dependably-community#670). Until that lands, this feed cannot answer it at all.
+
+The events kept at level 3 are still indexed and searchable; they are an audit trail, which is
+the right home for an operational insight.
 
 Two design points worth keeping:
 

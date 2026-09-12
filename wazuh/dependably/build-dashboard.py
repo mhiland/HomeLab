@@ -151,7 +151,7 @@ DEP = "rule.groups:dependably"
 
 metric("dep-m-events", "Audit events", DEP)
 metric("dep-m-supply", "Supply-chain alerts", "rule.groups:dependably_supply_chain", color_mode="Labels")
-metric("dep-m-tamper", "Artifact bytes replaced", "rule.id:100120", color_mode="Labels")
+metric("dep-m-authz", "Authorization denials", "rule.groups:dependably_authz", color_mode="Labels")
 metric("dep-m-authfail", "Failed logins", "rule.id:100110")
 metric("dep-m-critical", "CRITICAL vulns (latest)", "rule.groups:dependably_vuln",
        agg=max_agg("dep_critical"))
@@ -187,13 +187,14 @@ vis("dep-vuln-time", "Vulnerability posture over time", {
              dict(max_agg("dep_medium"), id="4")],
 }, "rule.groups:dependably_vuln")
 
-table("dep-supply-table", "Supply-chain events", "rule.groups:dependably_supply_chain", [
+table("dep-supply-table", "Artifact and policy events",
+      "rule.groups:(dependably_supply_chain or dependably_operational)", [
     ("data.dependably.event_time", "Event time (UTC)", 50),
     ("data.dependably.action", "Action", 10),
     ("data.dependably.purl", "Package", 50),
     ("data.dependably.detail_prior_artifact_hash", "Prior hash", 50),
     ("data.dependably.detail_artifact_hash", "New hash", 50),
-], description="package.replace with changed bytes, and every policy-block override.")
+], description="Policy overrides at level 10, alongside artifact republishes kept at level 3 as an operational record.")
 
 table("dep-config-table", "Configuration and tenant changes",
       "rule.groups:(dependably_config or dependably_privilege or dependably_credentials)", [
@@ -218,7 +219,7 @@ LAYOUT = [
     ("dep-nav",            0,  0, 48, 6),
     ("dep-m-events",       0,  6,  7, 6),
     ("dep-m-supply",       7,  6,  7, 6),
-    ("dep-m-tamper",      14,  6,  7, 6),
+    ("dep-m-authz" ,      14,  6,  7, 6),
     ("dep-m-authfail",    21,  6,  7, 6),
     ("dep-m-critical",    28,  6,  7, 6),
     ("dep-m-affected",    35,  6,  7, 6),
