@@ -294,11 +294,51 @@ If real-time matters more than `source_ip` and backfill, dependably's push forwa
   the manager, delete the saved objects, and remove `~/Library/Logs/dependably-siem` and
   `~/Library/Application Support/dependably-siem-poller` (the token lives there).
 
+## Running the tests
+
+`test_poller.py` sits next to the script rather than in a `tests/` directory - it is one
+file testing one file, and importlib already has to work around the script's hyphenated
+name (`import dependably-siem-poller` is not valid Python), so a package layout would add
+a directory for no benefit here.
+
+The script itself stays stdlib-only and pinned to `/usr/bin/python3` (see its docstring),
+but `/usr/bin/python3` has no pip packages installed system-wide and none should be added
+there. Build a throwaway venv **from that same interpreter** so the tests run under the
+production Python, not whatever `python3` resolves to on PATH:
+
+    /usr/bin/python3 -m venv /tmp/dependably-siem-poller-venv
+    /tmp/dependably-siem-poller-venv/bin/pip install pytest
+    /tmp/dependably-siem-poller-venv/bin/pytest test_poller.py -v
+
+No network access is required or made: every test that reaches `poll_events()` monkeypatches
+the module's `get_json` with a fake, and all state/log/token file paths are redirected into a
+pytest `tmp_path` by the `sandbox` fixture. The suite covers, with a name per behaviour:
+
+- watermark discipline (`test_main_holds_watermark_when_poll_fails`,
+  `test_main_advances_watermark_and_emits_events_on_success`,
+  `test_poll_events_holds_watermark_when_page_cap_hit_with_cursor_outstanding`)
+- id-ring de-duplication, both within one run's page walk and across runs
+  (`test_poll_events_dedupes_id_seen_within_the_same_run`,
+  `test_poll_events_dedupes_id_seen_in_a_prior_run`)
+- the `live`/backfilled split (`test_shape_event_marks_recent_event_live`,
+  `test_shape_event_marks_old_event_not_live`)
+- `EXCLUDED_ACTIONS` (`test_poll_events_drops_excluded_actions`)
+- `artifact_hash_changed` (the four `test_shape_event_artifact_hash_changed_*` tests)
+- the `DETAIL_KEYS` closed allowlist (`test_shape_event_lifts_only_allowlisted_detail_keys`)
+- `poller_error` emission on a failed poll and on a missing/empty token
+  (`test_main_holds_watermark_when_poll_fails`, `test_main_reports_missing_token_as_poller_error`,
+  `test_main_reports_empty_token_as_poller_error`)
+
+Each of the four properties called out above as regression-critical was verified to actually
+fail on a broken version of the code, not just pass on the current one - see the mutant table
+in the change that introduced this suite.
+
 ## Files
 
 | File | Where it goes |
 |---|---|
 | `dependably-siem-poller.py` | runs in place, from launchd |
+| `test_poller.py` | run locally before shipping a change to the poller; not deployed |
 | `ca.northwardlabs.dependably-siem-poller.plist` | `~/Library/LaunchAgents/` |
 | `ossec.conf.dependably.xml` | appended to `/Library/Ossec/etc/ossec.conf` |
 | `dependably_rules.xml` | manager `etc/rules/`, via the dashboard's rules importer |
