@@ -246,6 +246,23 @@ so `max` has nothing to aggregate and renders `-`. Nothing is broken; clear the 
 Unfiltered all-time counts as of the PoC, for comparison: Audit events 332, Supply-chain
 alerts 81, Artifact bytes replaced 45, Failed logins 40.
 
+## A transient upstream 400 was observed, and handled correctly
+
+On 2026-09-12 two consecutive polls returned HTTP 400 and the next succeeded with the same
+watermark and the same request shape. The instance logged no errors, and the identical query
+reproduced 200 immediately afterwards, so the cause is unexplained rather than diagnosed — recorded
+here as an observation, not a root cause.
+
+What matters is that the collector behaved as designed under an unplanned fault: it **held the
+watermark**, emitted two `poller_error` records, and re-read the same window on recovery. No events
+were lost and the gap is visible in the SIEM (rule 100170, level 10) rather than silent. That
+property had only ever been exercised by induced failures — a forced 401 and an unresolvable
+host — so this is the first time it was proven against a real one.
+
+If it recurs, capture the response body: the endpoint returns a `detail` string naming the
+rejected parameter, and the two candidates worth ruling out first are a `since`/`until` pair that
+collapses to zero width, and an over-long repeated `action=` list.
+
 ## Expect up to two minutes of latency
 
 A new event is not visible on the dashboard immediately, and that is normal. Two 60-second

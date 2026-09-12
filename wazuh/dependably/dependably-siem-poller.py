@@ -69,9 +69,20 @@ BACKFILL_HOURS = int(os.environ.get("DEPENDABLY_SIEM_BACKFILL_HOURS", "24"))
 ACTION_PREFIXES = [
     "login", "lockout", "auth", "saml", "user",      # authentication and accounts
     "mfa",                                           # MFA lifecycle: disable, recovery-code use
-    "oci", "metrics",                                # authorization/access denials
+    "oci", "metrics", "ratelimit",                   # authorization/access denials
     "tenant", "system_admin",                        # security configuration, operator actions
 ]
+
+# `auth.` above already covers the credential-refusal families dependably-community#676 adds
+# (auth.token.rejected, auth.capability.denied); `ratelimit.` covers #678. Both are listed
+# rather than assumed because the server's own default set cannot be relied on -- two of its
+# four documented prefixes match no writer at all.
+#
+# POLICY DENIALS ARE NOT ON THIS FEED. Blocked pulls live on the activity plane, served by
+# /api/v1/siem/events/activity (dependably-community#677a) -- a separate endpoint with its own
+# cursor and its own lag cap. Until that ships and this collector grows a second poll loop, a
+# SOC watching only this feed cannot see that a pull was refused by policy, which is the
+# highest-value detection the registry emits. Tracked as the remaining work in #668.
 
 # Actions collected by the prefixes above but deliberately NOT forwarded. These are DevOps
 # operational insight, not security telemetry: they belong in dependably's own audit trail,
