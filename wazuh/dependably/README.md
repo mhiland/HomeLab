@@ -121,6 +121,44 @@ rule has to pass: if this fires at 02:00, is there something to do about it?
 | 100123 / 100130 / 100141 / 100150 / 100151 / 100161 | 7 | publish, token created, credential change, setting change, tenant lifecycle, CRITICAL vulns present |
 | 100101 | 3 | catch-all, so a newly added action is still indexed before it has a rule |
 
+### Two feeds, and only one of them exists on every instance
+
+The collector drains both SIEM pull feeds every run:
+
+| Feed | Carries | Watermark |
+|---|---|---|
+| `/api/v1/siem/events/auth` | the `audit_log` plane - authentication, credential and capability refusals, MFA, SAML, security-setting change | ours: we pass `until` and commit it on a clean drain |
+| `/api/v1/siem/events/activity` | the `activity` plane - every block-gate refusal (`blocked_*`) | **the server's**: see below |
+
+They are polled in **separate `try` blocks holding separate watermarks and separate de-dupe
+rings**. Sharing either would mean a permanently broken activity feed stopped the audit feed
+from ever advancing, so the collector would fall further behind on both every run while
+reporting one error.
+
+**The activity watermark is the server's to give.** That plane is written by a background
+writer, so rows land late; the server subtracts its own lag from now, serves that window, and
+reports it back as `until`. It also *withholds* `until` on a truncated page, because rows come
+newest-first: a page carrying a cursor has served the newest slice and left older rows behind
+it, and a collector advancing to its own idea of `now` there would skip them permanently. So
+the collector takes `until` from the body, only once the cursor is exhausted, and never sends
+an `until` of its own.
+
+No `event=` filter is sent. The default for this feed is the whole `blocked*` family and no
+downloads, which is exactly the SOC subscription - and unlike the audit feed's default it
+cannot widen into non-refusal traffic, because adding downloads takes an explicit opt-in.
+
+**A 404 on the activity feed is a deployment fact, not an incident.** An instance older than
+the feed answers 404 forever, and at a 60-second poll that would post an identical
+`poller_error` every minute until someone upgraded - which teaches an operator to scroll past
+`poller_error`, including the real one. So the *state change* is the event: the collector emits
+one record on the first 404, one more when the feed starts answering, and logs the rest. A 500
+is still an incident and still fails the run.
+
+> As of 2026-09-13 `dependably.northwardlabs.ca` answers **404** on both
+> `/api/v1/siem/events/activity` and `/api/v1/siem/actions` - it predates them. The auth feed
+> works. Until that instance is redeployed, no `blocked_*` refusal can reach Wazuh from it, and
+> the rules that match them have nothing to fire on.
+
 ### What is deliberately not collected
 
 `package.replace`, `project.create` and `project.created` are filtered out in the poller
@@ -328,10 +366,24 @@ pytest `tmp_path` by the `sandbox` fixture. The suite covers, with a name per be
 - `poller_error` emission on a failed poll and on a missing/empty token
   (`test_main_holds_watermark_when_poll_fails`, `test_main_reports_missing_token_as_poller_error`,
   `test_main_reports_empty_token_as_poller_error`)
+- the activity plane's server-given watermark, including the two cases where it must be held
+  (`test_poll_activity_takes_the_watermark_from_the_server_not_the_clock`,
+  `test_poll_activity_holds_the_watermark_when_the_server_withholds_until`,
+  `test_poll_activity_holds_the_watermark_when_the_page_cap_is_hit`)
+- the two planes not bleeding into each other - separate rings, separate watermarks, separate
+  failure handling (`test_poll_activity_dedupes_on_its_own_ring`,
+  `test_main_keeps_the_two_planes_watermarks_independent`, `test_replay_rewinds_both_planes`)
+- the 404 quieting and its boundaries: once, not every minute; the recovery record; and a 500
+  still failing loudly (`test_main_reports_an_absent_activity_feed_once_not_every_minute`,
+  `test_main_reports_the_activity_feed_coming_back`,
+  `test_main_still_fails_loudly_on_a_broken_activity_feed`)
 
-Each of the four properties called out above as regression-critical was verified to actually
-fail on a broken version of the code, not just pass on the current one - see the mutant table
-in the change that introduced this suite.
+Each property called out above as regression-critical was verified to actually fail on a
+broken version of the code, not just pass on the current one. For the activity plane the
+mutants run were: take the watermark from our own clock instead of the server's `until`
+(2 red); share one de-dupe ring between the planes (1 red); fold the activity poll into the
+audit feed's `try` (1 red); quiet every HTTP error rather than only 404 (2 red); and never
+clear the absent flag (1 red).
 
 ## Files
 

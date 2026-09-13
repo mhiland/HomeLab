@@ -381,12 +381,16 @@ def test_main_holds_watermark_when_poll_fails(sandbox, poller):
     assert rc == 1
     state_after = poller.load_state()
     assert state_after["watermark"] == old_watermark
+    assert "activity_watermark" not in state_after
 
+    # A credential failure fails BOTH feeds, and each reports its own -- a single record would
+    # leave an operator reading "the audit poll is broken" while the refusal feed was equally
+    # dark. The stages are what distinguish a token problem (both) from one plane being down.
     lines = sandbox["out_file"].read_text().strip().splitlines()
-    assert len(lines) == 1
-    rec = json.loads(lines[0])
-    assert rec["dependably"]["record_type"] == "poller_error"
-    assert rec["dependably"]["stage"] == "events"
+    assert len(lines) == 2
+    stages = sorted(json.loads(l)["dependably"]["stage"] for l in lines)
+    assert stages == ["activity", "events"]
+    assert all(json.loads(l)["dependably"]["record_type"] == "poller_error" for l in lines)
 
 
 def test_main_advances_watermark_and_emits_events_on_success(sandbox, poller):
@@ -448,3 +452,203 @@ def test_replay_rewinds_watermark_and_clears_ring(sandbox, poller, capsys):
     expected = datetime.now(timezone.utc) - timedelta(hours=48)
     assert abs((rewound - expected).total_seconds()) < 5
     assert state["recent_ids"] == []
+
+
+# ---------------------------------------------------------------------------
+# poll_activity() and shape_activity_event()
+# ---------------------------------------------------------------------------
+
+def make_activity(id="act-1", action="blocked_license", created_at=None, detail=None, **extra):
+    """One activity-plane event. Deliberately missing `scope` and `orgSlug`: the server
+    says those are audit-plane columns with no counterpart here, so a shaper that invented
+    them would be shaping a response shape that does not exist."""
+    if created_at is None:
+        created_at = poller_iso_now()
+    item = {
+        "id": id,
+        "action": action,
+        "createdAt": created_at,
+        "orgId": "org-1",
+        "actorId": "user-1",
+        "ecosystem": "npm",
+        "purl": "pkg:npm/left-pad@1.3.0",
+        "sourceIp": "10.0.0.9",
+    }
+    if detail is not None:
+        item["detail"] = detail
+    item.update(extra)
+    return item
+
+
+def test_shape_activity_event_categorizes_every_blocked_arm_as_one_family(poller):
+    # The point of action_category: a rule matching "any block-gate refusal" must not have to
+    # enumerate the arms. Splitting on "." -- what the audit plane does -- would give each
+    # underscore-named arm its own category and break exactly that rule.
+    for arm in ("blocked_license", "blocked_vulnerability", "blocked_provenance"):
+        rec = poller.shape_activity_event(make_activity(action=arm), "inst")
+        assert rec["dependably"]["action_category"] == "blocked", arm
+        assert rec["dependably"]["action"] == arm
+    assert rec["dependably"]["record_type"] == "activity"
+
+
+def test_shape_activity_event_omits_columns_this_plane_does_not_have(poller):
+    rec = poller.shape_activity_event(make_activity(), "inst")
+    dep = rec["dependably"]
+    assert "scope" not in dep
+    assert "org_slug" not in dep
+    assert dep["org_id"] == "org-1"
+    assert dep["source_ip"] == "10.0.0.9"
+
+
+def test_poll_activity_takes_the_watermark_from_the_server_not_the_clock(poller, monkeypatch):
+    # The activity plane is written late, so the server subtracts its own lag and reports the
+    # window it actually served. Using our own `now` would claim rows the writer had not
+    # reached yet, and they would never be read again.
+    served = "2026-01-01T00:00:00.000Z"
+    fake = fake_get_json_pages([
+        {"items": [make_activity()], "next_cursor": None, "until": served, "lag_seconds": 30},
+    ])
+    monkeypatch.setattr(poller, "get_json", fake)
+    records, watermark, ids = poller.poll_activity("tok", {}, "inst")
+    assert len(records) == 1
+    assert watermark == served
+    assert ids == ["act-1"]
+
+
+def test_poll_activity_holds_the_watermark_when_the_server_withholds_until(poller, monkeypatch):
+    # A truncated page serves the NEWEST slice and leaves older rows behind the cursor, so the
+    # server withholds `until` there. Advancing anyway would skip every older row permanently.
+    # This is the failure the whole server-gives-the-watermark contract exists to prevent.
+    fake = fake_get_json_pages([
+        {"items": [make_activity(id="act-1")], "next_cursor": None, "until": None},
+    ])
+    monkeypatch.setattr(poller, "get_json", fake)
+    records, watermark, _ = poller.poll_activity("tok", {"activity_watermark": "held"}, "inst")
+    assert len(records) == 1, "the rows are still emitted"
+    assert watermark == "held", "but the window is not claimed as drained"
+
+
+def test_poll_activity_holds_the_watermark_when_the_page_cap_is_hit(poller, monkeypatch):
+    pages = [{"items": [make_activity(id="a%d" % i)], "next_cursor": "c%d" % i,
+              "until": "2026-01-01T00:00:00.000Z"}
+             for i in range(poller.MAX_PAGES + 2)]
+    monkeypatch.setattr(poller, "get_json", fake_get_json_pages(pages))
+    _, watermark, _ = poller.poll_activity("tok", {"activity_watermark": "held"}, "inst")
+    assert watermark == "held"
+
+
+def test_poll_activity_sends_no_until_and_no_event_filter(poller, monkeypatch):
+    # Not sending `until` is what lets the server apply its lag. Not sending `event` takes the
+    # server default, which is the whole blocked* family and no downloads.
+    fake = fake_get_json_pages([{"items": [], "next_cursor": None, "until": "x"}])
+    monkeypatch.setattr(poller, "get_json", fake)
+    poller.poll_activity("tok", {"activity_watermark": "2026-01-01T00:00:00.000Z"}, "inst")
+    params = fake.calls[0]
+    assert "until" not in params
+    assert "event" not in params
+    assert params["since"] == "2026-01-01T00:00:00.000Z"
+
+
+def test_poll_activity_dedupes_on_its_own_ring(poller, monkeypatch):
+    fake = fake_get_json_pages([
+        {"items": [make_activity(id="seen"), make_activity(id="fresh")],
+         "next_cursor": None, "until": "2026-01-01T00:00:00.000Z"},
+    ])
+    monkeypatch.setattr(poller, "get_json", fake)
+    # "seen" is in the ACTIVITY ring; the audit ring must not be consulted for this plane.
+    state = {"activity_recent_ids": ["seen"], "recent_ids": ["fresh"]}
+    records, _, ids = poller.poll_activity("tok", state, "inst")
+    assert ids == ["fresh"]
+    assert [r["dependably"]["event_id"] for r in records] == ["fresh"]
+
+
+def test_main_keeps_the_two_planes_watermarks_independent(sandbox, poller, monkeypatch):
+    # A broken activity feed must not stop the audit feed advancing. Sharing one handler would
+    # mean the collector fell further behind on BOTH planes every run while reporting one error.
+    def fake(path, params, token):
+        if "activity" in path:
+            raise urllib.error.HTTPError(path, 500, "Server Error", {}, None)
+        return {"items": [make_item(id="evt-1")], "next_cursor": None}
+
+    monkeypatch.setattr(poller, "get_json", fake)
+    rc = poller.main()
+    assert rc == 1, "a failed plane is still a failed run"
+
+    state = poller.load_state()
+    assert state.get("watermark"), "the audit feed advanced"
+    assert not state.get("activity_watermark"), "the activity feed did not"
+
+    kinds = [json.loads(l)["dependably"]["record_type"]
+             for l in sandbox["out_file"].read_text().strip().splitlines()]
+    assert "audit" in kinds, "the audit rows were still emitted"
+    assert "poller_error" in kinds, "and the activity failure was reported as an event"
+
+
+def test_replay_rewinds_both_planes(sandbox, poller):
+    # A replay that rewound only the audit plane would re-emit half the data and leave the
+    # operator believing they had replayed the window.
+    poller.save_state({
+        "watermark": "2026-01-01T00:00:00.000Z", "recent_ids": ["a"],
+        "activity_watermark": "2026-01-01T00:00:00.000Z", "activity_recent_ids": ["b"],
+    })
+    poller.replay(6)
+    state = poller.load_state()
+    assert state["watermark"] == state["activity_watermark"]
+    assert state["recent_ids"] == []
+    assert state["activity_recent_ids"] == []
+
+
+def test_main_reports_an_absent_activity_feed_once_not_every_minute(sandbox, poller, monkeypatch):
+    # A 404 is an instance older than the feed, not an incident. Emitting it every run would
+    # post an identical record every minute and teach the operator to scroll past poller_error.
+    def fake(path, params, token):
+        if "activity" in path:
+            raise urllib.error.HTTPError(path, 404, "Not Found", {}, None)
+        return {"items": [], "next_cursor": None}
+
+    monkeypatch.setattr(poller, "get_json", fake)
+
+    assert poller.main() == 0, "an instance that predates the feed is not a failed run"
+    first = sandbox["out_file"].read_text().strip().splitlines()
+    assert len(first) == 1
+    rec = json.loads(first[0])["dependably"]
+    assert rec["stage"] == "activity"
+    assert "404" in rec["message"]
+    assert poller.load_state()["activity_absent"] is True
+
+    assert poller.main() == 0
+    assert len(sandbox["out_file"].read_text().strip().splitlines()) == 1, "still one record"
+
+
+def test_main_reports_the_activity_feed_coming_back(sandbox, poller, monkeypatch):
+    # The other half: an operator who was told the feed is missing has to be told when it is
+    # not, or the first 404 record stands as the last word forever.
+    poller.save_state({"activity_absent": True})
+    served = "2026-01-01T00:00:00.000Z"
+
+    def fake(path, params, token):
+        if "activity" in path:
+            return {"items": [], "next_cursor": None, "until": served}
+        return {"items": [], "next_cursor": None}
+
+    monkeypatch.setattr(poller, "get_json", fake)
+    assert poller.main() == 0
+
+    messages = [json.loads(l)["dependably"].get("message", "")
+                for l in sandbox["out_file"].read_text().strip().splitlines()]
+    assert any("recovered" in m for m in messages)
+    assert "activity_absent" not in poller.load_state()
+    assert poller.load_state()["activity_watermark"] == served
+
+
+def test_main_still_fails_loudly_on_a_broken_activity_feed(sandbox, poller, monkeypatch):
+    # Only 404 is special-cased. A 500 is an incident and must keep failing the run, or the
+    # quieting added for old instances would swallow a real outage.
+    def fake(path, params, token):
+        if "activity" in path:
+            raise urllib.error.HTTPError(path, 500, "Server Error", {}, None)
+        return {"items": [], "next_cursor": None}
+
+    monkeypatch.setattr(poller, "get_json", fake)
+    assert poller.main() == 1
+    assert "activity_absent" not in poller.load_state()

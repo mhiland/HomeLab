@@ -52,20 +52,24 @@ LIVE_WINDOW_SECONDS = 300
 HTTP_TIMEOUT = 30
 BACKFILL_HOURS = int(os.environ.get("DEPENDABLY_SIEM_BACKFILL_HOURS", "24"))
 
-# The action filter builds `LIKE '<prefix>.%'` server-side -- always with a trailing dot. So
-# only actions that CONTAIN a dot can ever be returned, and these twelve prefixes are the
-# complete reachable set (34 of dependably's 86 audit_log actions as of 0.10.0).
+# Each value matches the action of exactly that name PLUS every action in its dotted family.
+# Flat underscore names (checksum_failure, ssrf_blocked, token_created, member_role_changed, ...)
+# are reachable by naming them directly -- they were not, before the server's filter appended the
+# family separator unconditionally, which is why this list is families rather than leaf names.
 #
-# The other 52 are flat names with underscores (checksum_failure, ssrf_blocked,
-# provenance_verification_failed, upstream_source_pin_violation, token_created,
-# member_role_changed, trust_anchor_added, quarantine_decision, ...) and NO value of `action=`
-# can match them -- passing "token_created" yields the pattern 'token_created.%'. They are not
-# missing from this list; they are unreachable through the API. Several are exactly the events
-# a SIEM most wants. Filed against dependably as a blocking gap on issue #668.
+# These eleven are all dotted-family roots, so each costs the server one unindexable LIKE per
+# candidate row. Naming leaf actions instead would be the cheaper query and the tighter
+# subscription -- the server publishes the whole vocabulary at GET /api/v1/siem/actions, and a
+# pinned list does not silently widen when an upgrade adds an action to the default set. That
+# swap is worth making; it needs the dogfood instance on a build that serves the vocabulary
+# endpoint so the list can be generated from it rather than transcribed by hand.
 #
-# Note the server's own documented default (login. lockout. token. rbac.) is half dead for the
-# same reason: the writers emit token_created and member_role_changed, so `token.` and `rbac.`
-# match nothing. Never rely on the default; always pass this list explicitly.
+# Never rely on the server default: it is the security vocabulary AS OF THE RUNNING RELEASE, so
+# relying on it means new event types start arriving without anyone deciding they should.
+#
+# The family budget is bounded (max_family_filters, published by /api/v1/siem/actions -- 25 on
+# 0.10.0). Eleven is well inside it, and the bound is shared with any value this release does
+# not recognize, so a list transcribed from a newer instance spends the same budget.
 ACTION_PREFIXES = [
     "login", "lockout", "auth", "saml", "user",      # authentication and accounts
     "mfa",                                           # MFA lifecycle: disable, recovery-code use
@@ -265,6 +269,126 @@ def shape_event(item, instance):
     }
 
 
+def shape_activity_event(item, instance):
+    """Turns one activity-plane event into the record Wazuh indexes.
+
+    The server deliberately mirrors the audit feed's field names -- `action` carries the
+    activity plane's event_type -- so one parser reads both streams. Two columns have no
+    counterpart here (`scope`, `orgSlug`); they are simply absent rather than null-filled.
+    """
+    action = item.get("action") or "unknown"
+    dep = {
+        "instance": instance,
+        "record_type": "activity",
+        "event_id": item.get("id"),
+        "event_time": item.get("createdAt"),
+        "action": action,
+        # Same purpose as the audit plane's: give a rule one field to match a whole family
+        # without a regex. Block-gate arms are flat underscore names (blocked_license,
+        # blocked_vulnerability, ...) rather than dotted, so splitting on "." would hand every
+        # arm its own category and a rule wanting "any refusal" would have to enumerate them.
+        "action_category": "blocked" if action.startswith("blocked") else action.split(".", 1)[0],
+        "org_id": item.get("orgId"),
+        "actor_id": item.get("actorId"),
+        "ecosystem": item.get("ecosystem"),
+        "purl": item.get("purl"),
+        "source_ip": item.get("sourceIp"),
+    }
+
+    created = item.get("createdAt")
+    dep["live"] = "false"
+    if created:
+        try:
+            age = (datetime.now(timezone.utc)
+                   - datetime.fromisoformat(created.replace("Z", "+00:00"))).total_seconds()
+            dep["live"] = "true" if age <= LIVE_WINDOW_SECONDS else "false"
+        except ValueError:
+            pass
+
+    raw = item.get("detail")
+    detail = {}
+    if raw:
+        dep["detail_raw"] = raw if isinstance(raw, str) else json.dumps(raw)
+        try:
+            parsed = json.loads(raw) if isinstance(raw, str) else raw
+            if isinstance(parsed, dict):
+                detail = parsed
+        except ValueError:
+            pass
+    for key in DETAIL_KEYS:
+        if key in detail and detail[key] is not None:
+            dep["detail_" + key] = str(detail[key])
+
+    return {
+        "timestamp": item.get("createdAt"),
+        "dependably": {k: v for k, v in dep.items() if v is not None},
+    }
+
+
+def poll_activity(token, state, instance):
+    """Drains /api/v1/siem/events/activity -- the block-gate refusals.
+
+    Returns (records, new_watermark, fresh_ids) or raises. A separate plane with separate
+    ids, so it keeps its own watermark and its own de-dupe ring; sharing either with the
+    audit feed would let one plane's progress silently skip the other's rows.
+
+    THE WATERMARK IS THE SERVER'S TO GIVE, which is the one real difference from
+    poll_events. The activity plane is written by a background writer, so rows land late:
+    the server subtracts its own lag from now, serves that window, and reports it back as
+    `until`. It also WITHHOLDS `until` on a truncated page -- rows come newest-first, so a
+    page carrying a cursor has served the newest slice and left older rows behind it, and a
+    collector that advanced to its own idea of `now` there would skip them permanently.
+    So: take `until` from the body, and only once the cursor is exhausted.
+
+    No `event=` filter is sent. The server's default for this feed is the whole `blocked*`
+    family and no downloads, which is exactly the SOC subscription -- and unlike the audit
+    feed's default it cannot widen into non-refusal traffic, because adding a download to it
+    would take an explicit opt-in flag.
+    """
+    now = datetime.now(timezone.utc)
+    watermark = state.get("activity_watermark")
+    if not watermark:
+        watermark = iso(now - timedelta(hours=BACKFILL_HOURS))
+        log("no activity watermark; backfilling %d hours from %s"
+            % (BACKFILL_HOURS, watermark))
+
+    seen = set(state.get("activity_recent_ids", []))
+    records, fresh_ids = [], []
+    cursor, pages = None, 0
+    served_until = None
+
+    while pages < MAX_PAGES:
+        # `until` is deliberately not sent: letting the server apply its own lag is what
+        # keeps us from reading past the point the activity writer has actually reached.
+        params = {"since": watermark, "limit": PAGE_LIMIT}
+        if cursor:
+            params["cursor"] = cursor
+        body = get_json("/api/v1/siem/events/activity", params, token)
+        for item in body.get("items") or []:
+            eid = item.get("id")
+            if eid and eid in seen:
+                continue
+            if eid:
+                seen.add(eid)
+                fresh_ids.append(eid)
+            records.append(shape_activity_event(item, instance))
+        cursor = body.get("next_cursor")
+        served_until = body.get("until")
+        pages += 1
+        if not cursor:
+            break
+    else:
+        log("activity page cap hit with cursor outstanding; leaving watermark at %s" % watermark)
+        return records, watermark, fresh_ids
+
+    # A last page that still withholds `until` is not a window we may claim to have drained.
+    if not served_until:
+        log("activity feed served no watermark; leaving it at %s" % watermark)
+        return records, watermark, fresh_ids
+
+    return records, served_until, fresh_ids
+
+
 def poll_events(token, state, instance):
     """Returns (records, new_watermark) or raises. Watermark is only the caller's to commit."""
     now = datetime.now(timezone.utc)
@@ -327,8 +451,12 @@ def replay(hours):
     the dashboard's tables show that column rather than the alert timestamp.
     """
     state = load_state()
-    state["watermark"] = iso(datetime.now(timezone.utc) - timedelta(hours=hours))
+    rewound = iso(datetime.now(timezone.utc) - timedelta(hours=hours))
+    # Both planes, or a replay re-emits the audit feed and silently leaves the refusals behind.
+    state["watermark"] = rewound
     state["recent_ids"] = []
+    state["activity_watermark"] = rewound
+    state["activity_recent_ids"] = []
     save_state(state)
     log("replay armed: watermark rewound to %s" % state["watermark"])
     print("watermark rewound to %s; the next poll re-emits that window" % state["watermark"])
@@ -368,6 +496,45 @@ def main():
             detail = "HTTP %s %s" % (exc.code, exc.reason)
         log("event poll failed: %s (watermark held)" % detail)
         out.append(error_record("events", detail))
+        failed = True
+
+    # Its own try, not a second statement inside the one above: the two feeds read different
+    # tables and hold different watermarks, so a 500 on one must not hold the other's window
+    # open. Sharing a handler would also mean a permanently broken activity feed stopped the
+    # audit feed from ever advancing -- the collector would fall further behind every run
+    # while reporting one error.
+    try:
+        records, watermark, fresh_ids = poll_activity(token, state, instance)
+        out.extend(records)
+        state["activity_watermark"] = watermark
+        state["activity_recent_ids"] = (
+            state.get("activity_recent_ids", []) + fresh_ids)[-RECENT_IDS_KEPT:]
+        log("activity: %d new, watermark %s" % (len(records), watermark))
+        if state.pop("activity_absent", False):
+            log("activity feed is being served again")
+            out.append(error_record("activity", "feed is being served again (recovered)"))
+    except urllib.error.HTTPError as exc:
+        if exc.code == 404:
+            # An instance older than the activity feed, not a broken one. Polling every
+            # minute would otherwise post an identical error record every minute, and an
+            # operator who learns to scroll past poller_error is an operator who will scroll
+            # past the real one. So the STATE CHANGE is the event: emit on the first 404 and
+            # again when it clears, and log the rest.
+            if not state.get("activity_absent"):
+                log("activity feed absent (404): instance predates it; reporting once")
+                out.append(error_record(
+                    "activity", "feed not served by this instance (HTTP 404); "
+                                "upgrade to a build that serves /api/v1/siem/events/activity"))
+                state["activity_absent"] = True
+            else:
+                log("activity feed still absent (404)")
+        else:
+            log("activity poll failed: HTTP %s %s (watermark held)" % (exc.code, exc.reason))
+            out.append(error_record("activity", "HTTP %s %s" % (exc.code, exc.reason)))
+            failed = True
+    except (urllib.error.URLError, ValueError, OSError) as exc:
+        log("activity poll failed: %s (watermark held)" % exc)
+        out.append(error_record("activity", exc))
         failed = True
 
     emit(out)
