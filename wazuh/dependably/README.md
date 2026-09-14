@@ -7,9 +7,10 @@ the generalized write-up belongs in `dependably-documentation` as an integration
 
 ```
 dependably.northwardlabs.ca                         studio (Wazuh agent 011)
-  GET /api/v1/siem/events/auth  ──────────────►  dependably-siem-poller.py  (launchd, 60 s)
-  GET /api/v1/siem/vulnerabilities/summary               │
-      (every 15 min)                                     ▼
+  GET /api/v1/siem/events/auth      ─┐
+  GET /api/v1/siem/events/activity  ─┴──────────►  dependably-siem-poller.py  (launchd, 60 s)
+                                                             │
+                                                             ▼
                                           ~/Library/Logs/dependably-siem/audit.log
                                                          │  one JSON object per line
                                                          ▼
@@ -66,8 +67,11 @@ pull API. Pull wins here on every axis that matters:
        sudo env PATH=/usr/bin:/bin:/usr/sbin:/sbin /Library/Ossec/bin/wazuh-control restart
 
 4. **Manager rules.** Dashboard, Server management, Rules, Import files, upload
-   `dependably_rules.xml` (tick Overwrite when replacing). No manager restart is needed;
-   confirm with Server management, Rules, filter `Custom rules`.
+   `dependably_rules.xml` (tick Overwrite when replacing). **A manager restart is required for
+   the import to take effect** — see "The gotcha that cost the most time" below; `Server
+   management > Rules` and `/logtest` both look correct while analysisd is still on the old
+   ruleset, so do not use either as confirmation. `Server management > Status > Restart`, then
+   verify with a real search on `wazuh-alerts-*`.
 
 5. **Dashboard.** Dashboards Management, Saved objects, Import `dependably-dashboard.ndjson`.
    Opens at Dashboards, "Dependably Registry". The importer **regenerates object ids**, so a
@@ -97,29 +101,45 @@ pull API. Pull wins here on every axis that matters:
 
 ## What it detects
 
-Rules `100100-100199`, all verified against `/logtest` before shipping - including a
-negative control (a non-dependably JSON line matches nothing) and the catch-all.
+Rules `100100-100199`. Every rule below is transcribed directly from `dependably_rules.xml`
+(`grep '<rule id=' dependably_rules.xml` reproduces this table verbatim) rather than kept by
+hand, after this table drifted from the real ruleset once already — see git history for what
+that looked like.
 
 Severity reflects **what a SOC can act on**, not what is technically interesting. The test each
 rule has to pass: if this fires at 02:00, is there something to do about it?
 
 | Rule | Level | Signal |
 |---|---|---|
-| 100113 | 12 | login success inside 300 s of a failure burst |
-| 100122 | 10 | `package.override.set` to `allow` - a human disabled a control for a named package |
-| 100125 | 10 | repeated authorization denials from one actor - capability probing |
+| 100113 | 12 | successful login straight after a run of failures - possible brute-force success |
+| 100106 | 10 | repeated policy refusals from one actor - possible probing |
+| 100103 | 10 | **BLOCKED** a known-malicious or actively-exploited package |
+| 100111 | 10 | repeated failed logins - possible brute force or password spray |
+| 100114 | 10 | account lockout triggered |
+| 100125 | 10 | repeated authorization denials from one actor - possible capability probing |
 | 100126 | 10 | SAML role change - privilege movement through the IdP |
+| 100128 | 10 | MFA **weakened** - disabled, or a recovery code spent |
+| 100140 | 10 | privilege change (`rbac.*` / `auth.saml.role*`) |
+| 100152 | 10 | tenant **deleted** |
 | 100153 | 10 | a **security** setting changed (policy, enforcement, verify, overwrite, MFA, SSO) |
-| 100124 | 7 | authorization denied - a credential attempting what it is not entitled to |
-| 100120 | **3** | `package.replace` - **operational, not a detection** (see below) |
-| 100122 | 10 | `package.override.set` to `allow` - a human overrode a policy block on a named package |
-| 100111 | 10 | 8 failed logins in 120 s |
-| 100114 | 10 | account lockout |
-| 100140 | 10 | `rbac.*` / `auth.saml.role*` privilege change |
-| 100152 | 10 | tenant deleted |
 | 100170 | 10 | the poller itself failed |
-| 100123 / 100130 / 100141 / 100150 / 100151 / 100161 | 7 | publish, token created, credential change, setting change, tenant lifecycle, CRITICAL vulns present |
-| 100101 | 3 | catch-all, so a newly added action is still indexed before it has a rule |
+| 100104 | 7 | blocked on vulnerability score (EPSS / vuln_score threshold) |
+| 100124 | 7 | authorization denied - a credential attempting what it is not entitled to |
+| 100127 | 7 | SAML configuration changed |
+| 100129 | 7 | MFA lifecycle event (enrolled, disabled, recovery code used, ...) |
+| 100130 | 7 | API token created |
+| 100141 | 7 | credential change (password, email) |
+| 100151 | 7 | tenant lifecycle (created, restored, status/quota changed) |
+| 100154 | 7 | instance-operator action - legitimate admin work, and what a stolen operator session does too |
+| 100105 | 5 | blocked by policy (licence, provenance, deprecation, install script, revoked, manual, release age) |
+| 100110 | 5 | failed login (live) |
+| 100131 | 5 | API token revoked |
+| 100150 | 5 | a (non-security) setting changed |
+| 100101 | 3 | audit-plane catch-all, so a newly added action is indexed before it has a rule of its own |
+| 100102 | 3 | activity-plane catch-all, same purpose |
+| 100112 | 3 | login (live) |
+| 100115 / 100116 | 3 | failed / successful login, **backfilled history** - no correlation group, cannot feed 100111/100113 |
+| 100100 | 0 | parent; matches any record the poller wrote, never itself indexed |
 
 ### Two feeds, and only one of them exists on every instance
 
@@ -154,10 +174,10 @@ the feed answers 404 forever, and at a 60-second poll that would post an identic
 one record on the first 404, one more when the feed starts answering, and logs the rest. A 500
 is still an incident and still fails the run.
 
-> As of 2026-09-13 `dependably.northwardlabs.ca` answers **404** on both
-> `/api/v1/siem/events/activity` and `/api/v1/siem/actions` - it predates them. The auth feed
-> works. Until that instance is redeployed, no `blocked_*` refusal can reach Wazuh from it, and
-> the rules that match them have nothing to fire on.
+`dependably.northwardlabs.ca` was on a build that answered 404 on both endpoints until it was
+upgraded to 0.11.0 on 2026-09-14. The 404-quieting behaviour above was written and tested against
+that exact transition, and the collector logged the recovery automatically, unattended, the first
+poll after the upgrade - `activity feed is being served again`.
 
 ### What is deliberately not collected
 
@@ -176,42 +196,73 @@ that already existed" - and was originally level 12. It is not a detection here:
   rule and loses the genuine edge cases with it.
 
 The security-relevant form of the question - "did a replace happen where policy forbade it?" -
-is a block-gate denial, which lives in the activity plane and never reaches a SIEM
-(dependably-community#670).
+is a block-gate denial, and unlike `package.replace` itself, that **does** reach Wazuh: it lands
+on the activity plane and matches rules 100102-100106 (dependably-community#670, closed).
+`package.replace` and `project.create`/`project.created` remain deliberately excluded; only the
+noise is gone, not the signal.
 
-**Trade-off accepted:** neither event is available in Wazuh as forensic context during an
-investigation. Pivot to dependably's own audit trail for that.
+**Trade-off accepted:** the excluded events themselves are not available in Wazuh as forensic
+context during an investigation. Pivot to dependably's own audit trail for that.
 
-After filtering, every action that reaches Wazuh is security-relevant:
+After filtering, every action that reaches Wazuh is security-relevant. Representative, not
+exhaustive - `GET /api/v1/siem/actions` publishes the full declared vocabulary:
 
-    login.success  login.failure  oci.scope_denied  package.override.set
-    tenant.setting.change  auth.saml.*  saml.*        (+ the vuln_summary gauge)
+    login.success  login.failure  oci.scope_denied  auth.saml.*  saml.*
+    mfa.*  tenant.setting.change  tenant.deleted  token.created
+    blocked_deprecated  blocked_license  blocked_malicious  blocked_*  (the whole family)
+
+`package.override.set` is in `EXCLUDED_ACTIONS`, same as `package.replace` - it never reaches
+Wazuh at all, despite earlier revisions of this doc describing a dedicated rule (id 100122) for
+it. That rule does not exist in the current `dependably_rules.xml`, and `EXCLUDED_ACTIONS`
+confirms the omission is deliberate, not a regression: the doc drifted, the poller did not.
 
 Two design points worth keeping:
 
-- **Wazuh rules cannot compare one field against another**, so "did the artifact bytes
-  actually change?" is decided in the poller and published as
-  `dependably.artifact_hash_changed`, which rule 100120 matches as a plain value.
+- **Wazuh rules cannot compare one field against another.** `shape_event` still computes
+  `dependably.artifact_hash_changed` for a `package.replace` event - "did the artifact bytes
+  actually change?" is exactly the kind of question only the poller can answer, by comparing
+  two fields dependably's own event carries - but `package.replace` is in `EXCLUDED_ACTIONS`
+  and never reaches `shape_event` in the current build, so the field is currently dead code and
+  no rule matches it. The design point (compute cross-field comparisons in the poller, publish
+  the answer as a plain value a rule can match) is still the right one to keep in mind for the
+  next action that needs it.
 - **Field matches are pinned to `type="pcre2"`.** In OS_Regex `\.` means *any character*,
   so `^login\.failure$` would quietly also match `loginXfailure`.
 
-## What it cannot detect, and why
+## What it could not detect, and what changed
 
-These are properties of dependably's SIEM surface, not of this integration. All are
-recorded as gaps G1-G5 on issue #668.
+These were properties of dependably's SIEM surface, not of this integration, tracked as gaps
+dependably-community#669-674 off the PoC issue #668. All six are now closed - most of what this
+section originally listed here as a permanent limitation was fixed underneath this integration
+without anything in `dependably-siem-poller.py` needing to change. What remains is genuinely
+either closed or a deliberate design choice, not an open gap:
 
-- **Failed logins are unattributable.** `login.failure` rows carry no actor id and no
-  email. Behind a reverse proxy with `TRUSTED_PROXIES` unset - the documented fail-closed
-  default - every `source_ip` is the Docker bridge gateway, `172.17.0.1`. Rule 100111
-  counts failures honestly; nothing can say whose or from where.
-- **Policy denials are invisible.** A blocked pull lands in dependably's `activity` plane;
-  the SIEM endpoint reads `audit_log`, and the two are deliberately never dual-written.
-  "Someone tried to pull a package the policy blocks" is the highest-value detection this
-  product could emit and it does not reach a SIEM at all.
-- **Everything is an opaque id.** `actorEmail` and `orgSlug` are always null in the feed.
-- **The action vocabulary is hardcoded.** `action=` is a repeatable prefix filter with no
-  wildcard, so `ACTION_PREFIXES` in the poller has to name every category, and a category
-  dependably adds later is silently absent until it is added there too.
+- **Policy denials now reach Wazuh** (#670, closed). A blocked pull lands on dependably's
+  `activity` plane; the collector polls it (`poll_activity`, above) and rules 100102-100106
+  match it. This was the single highest-value gap this section used to name, and it is the one
+  most thoroughly verified: a live replay landed 428 activity events in `wazuh-alerts-*`, and a
+  `blocked_deprecated` row resolved to `rule.id: 100105`, confirming the tiered rule fires and
+  not just the catch-all.
+- **The action vocabulary is no longer hardcoded** (#669, closed). `action=` matches the action
+  of exactly that name plus its dotted family - not a bare prefix - and `GET
+  /api/v1/siem/actions` publishes the full declared vocabulary plus the two limits a request may
+  carry. `ACTION_PREFIXES` in the poller is now a list of dotted-family roots chosen for cost
+  (each costs an unindexable `LIKE`), not a list of the only names reachable at all.
+- **`orgSlug` is projected** (#671, closed - partially). `shape_event`/`shape_activity_event`
+  read `item.get("orgSlug")` and it resolves to a real slug, not null, confirmed live. `actorEmail`
+  remains always null - that half stays deliberate, not a gap: a user's display name is an email,
+  and it would be personal data outside the retention/erasure sweeps' fixed column list.
+- **`source_ip` attribution now depends on your own deployment, not on dependably.**
+  `TRUSTED_PROXIES` unset is still the documented fail-closed default (#672, closed - the
+  startup warning shipped; setting the value is still the operator's job). On this instance it
+  is now set, and Web Station's proxy was also, separately, not sending `X-Forwarded-For` at
+  all until that was added too - both were needed. Verified live: a test login through the real
+  proxy recorded the connecting address, not the Docker bridge gateway.
+- **Push carries strictly less than pull, and now says so** (#673, closed - documentation only,
+  the gap in push itself is unchanged: no `source_ip`, no backfill, drops on queue overflow).
+  Irrelevant to this integration, which only ever used pull.
+- **`project.create` vs `project.created`** (#674, closed) - a duplicate-spelling bug in the
+  writer, not a reader-side gap; not something this poller ever needed to work around.
 
 ## The gotcha that cost the most time: analysisd does not reload the ruleset
 
