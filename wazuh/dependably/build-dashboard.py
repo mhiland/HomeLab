@@ -121,10 +121,10 @@ objs.append({
         "visState": json.dumps({
             "title": "About this feed", "type": "markdown",
             "params": {"fontSize": 11, "openLinksInNewTab": True, "markdown":
-                       "**Dependably** artifact registry - `dependably.northwardlabs.ca`. "
-                       "Pulled every 60s by `dependably-siem-poller.py` on **studio**, "
-                       "rules `100100-100199`. "
-                       "[Homelab SOC Overview](/app/dashboards#/view/homelab-soc-overview)\n\n"
+                       "**Dependably** artifact registry. Pulled every 60s by "
+                       "`dependably-siem-poller.py` - see the SIEM integration guide in "
+                       "your dependably-documentation checkout for setup - rules "
+                       "`100100-100199`.\n\n"
                        "Three things this dashboard cannot paper over:\n\n"
                        "- **Failed logins have no attributable source.** Dependably's "
                        "`login.failure` rows carry no actor id, and behind a reverse proxy "
