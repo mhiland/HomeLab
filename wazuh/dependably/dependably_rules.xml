@@ -221,7 +221,65 @@
     <group>dependably_config,</group>
   </rule>
 
+  <!-- == Policy refusals (activity plane) =======================================
+       A separate feed from everything above: audit_log names WHO did WHAT, activity
+       names WHAT WAS REFUSED by a block-gate policy before it reached the tenant.
+       Added when the collector started polling /api/v1/siem/events/activity: rule
+       100100 matched these lines all along (any dependably.instance record), but
+       nothing below it recognized dependably.record_type == activity, so every
+       refusal stopped at the level-0 parent and was silently dropped. Confirmed via
+       Discover against wazuh-alerts-*: 1,010 audit-plane hits, zero activity-plane
+       ones, across 90 days of a collector that had already shipped 184 of them. -->
+
+  <!-- Catch-all, same purpose as 100101: a block reason added to the gate is indexed
+       before it has a rule of its own, rather than disappearing into the parent. -->
+  <rule id="100102" level="3">
+    <if_sid>100100</if_sid>
+    <field name="dependably.record_type" type="pcre2">^activity$</field>
+    <description>Dependably: $(dependably.action) refused for $(dependably.purl).</description>
+    <group>dependably_activity,</group>
+  </rule>
+
+  <!-- Confirmed malicious, actively-exploited (KEV), or a live compromise indicator.
+       The gate worked: this is what it caught, not an in-progress incident, but a
+       SOC wants same-day visibility into which org and package it was. -->
+  <rule id="100103" level="10">
+    <if_sid>100102</if_sid>
+    <field name="dependably.action" type="pcre2">^blocked_(malicious|malicious_live|kev|kev_ransomware|ssvc_exploitation)$</field>
+    <description>Dependably: BLOCKED known-malicious/actively-exploited package - $(dependably.action) on $(dependably.purl).</description>
+    <group>dependably_activity,dependably_supplychain,</group>
+  </rule>
+
+  <!-- Score-driven refusals: a vulnerability crossed a configured threshold. Worth a
+       look, not a page: the number itself is a policy choice, not an indicator. -->
+  <rule id="100104" level="7">
+    <if_sid>100102</if_sid>
+    <field name="dependably.action" type="pcre2">^blocked_(epss|epss_percentile|vuln_score)$</field>
+    <description>Dependably: blocked on vulnerability score - $(dependably.action) on $(dependably.purl).</description>
+    <group>dependably_activity,dependably_supplychain,</group>
+  </rule>
+
+  <!-- Policy and hygiene refusals: licence, provenance, deprecation, install scripts,
+       a revoked artefact, an operator's manual block. Routine gate operation, but
+       still an attempted pull a SOC may want in an investigation timeline. -->
+  <rule id="100105" level="5">
+    <if_sid>100102</if_sid>
+    <field name="dependably.action" type="pcre2">^blocked_(license|provenance|deprecated|install_script|revoked|manual|release_age)$</field>
+    <description>Dependably: blocked by policy - $(dependably.action) on $(dependably.purl).</description>
+    <group>dependably_activity,</group>
+  </rule>
+
+  <!-- Repeated refusals from one actor is policy probing, not routine friction,
+       the authz analog of 100125. -->
+  <rule id="100106" level="10" frequency="6" timeframe="120">
+    <if_matched_sid>100102</if_matched_sid>
+    <same_field>dependably.actor_id</same_field>
+    <description>Dependably: repeated policy refusals from one actor - possible probing.</description>
+    <group>dependably_activity,access_denied,</group>
+  </rule>
+
   <!-- == Feed health ============================================================
+
        A collector that stopped collecting looks exactly like a quiet instance. The
        poller reports its own failures so the difference is visible. -->
 
