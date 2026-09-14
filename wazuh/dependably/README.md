@@ -2,8 +2,11 @@
 
 Monitors the self-hosted dependably artifact registry at `dependably.northwardlabs.ca`
 from the homelab Wazuh manager (192.168.2.18, v4.12.0). Proof of concept for
-[dependably-community#668](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-community/-/work_items/668);
-the generalized write-up belongs in `dependably-documentation` as an integration section.
+[dependably-community#668](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-community/-/work_items/668).
+The generalized, product-facing write-up ships in `dependably-documentation` →
+[Integrations → SIEM and SOC integration](https://gitlab.northwardlabs.ca/moonlitlabs/dependably-documentation/-/blob/main/docs/en/integrations/siem/index.md) -
+this file stays the homelab-specific implementation log: what broke, what a generic operator
+guide would never need to say, and the exact commands for this deployment.
 
 ```
 dependably.northwardlabs.ca                         studio (Wazuh agent 011)
